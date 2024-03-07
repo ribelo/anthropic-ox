@@ -74,6 +74,15 @@ impl MessagesRequestBuilder {
         self
     }
 
+    pub fn add_message<T: Into<Message>>(mut self, message: T) -> Self {
+        if let Some(ref mut messages) = self.messages {
+            messages.push_message(message);
+        } else {
+            self.messages = Some(Messages::from(message.into()));
+        }
+        self
+    }
+
     pub fn model<T: AsRef<str>>(mut self, model: T) -> Self {
         self.model = Some(model.as_ref().to_string());
         self
