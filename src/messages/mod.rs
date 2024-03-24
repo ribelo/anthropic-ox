@@ -17,7 +17,7 @@ use self::message::{Message, Messages};
 
 const API_URL: &str = "v1/messages";
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MessagesRequest {
     pub messages: Messages,
     pub model: String,
