@@ -202,6 +202,9 @@ pub struct ContentBlockDelta {
 }
 
 impl MessagesRequest {
+    pub fn push_message<T: Into<Message>>(&mut self, message: T) {
+        self.messages.push_message(message);
+    }
     pub async fn send(&self) -> Result<MessagesResponse, ApiRequestError> {
         let url = format!("{}/{}", BASE_URL, API_URL);
         let mut body = serde_json::to_value(self).unwrap();
