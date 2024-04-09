@@ -1,9 +1,8 @@
 pub mod message;
+pub mod tools;
 
 use std::{borrow::Cow, fmt, ops::Deref, sync::Arc};
 
-#[cfg(feature = "tools")]
-use ai_tools_ox::tools::{self, ToTool, Tool, Tools};
 use derivative::Derivative;
 use reqwest_eventsource::{self, Event, RequestBuilderExt};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -229,6 +228,7 @@ impl MessagesRequest {
             })
         }
     }
+
     pub async fn stream(&self) -> impl Stream<Item = MessagesStreamDelta> {
         let url = format!("{}/{}", BASE_URL, API_URL);
         let mut body = serde_json::to_value(self).unwrap();
@@ -252,6 +252,7 @@ impl MessagesRequest {
                         "message_start" => {}
                         "message_stop" => {
                             es.close();
+                            break;
                         }
                         "content_block_start" => {}
                         "ping" => {}
@@ -260,15 +261,22 @@ impl MessagesRequest {
                             {
                                 tx.send(block.delta).unwrap();
                             } else {
+                                es.close();
                                 eprintln!("error: {:?}", msg.data);
+                                break;
                             }
                         }
                         "content_block_stop" => {}
                         "message_delta" => {}
-                        other => unimplemented!("{other}"),
+                        other => {
+                            eprintln!("Nieznany typ zdarzenia: {}", other);
+                            es.close();
+                            break;
+                        }
                     },
                     Err(err) => {
-                        println!("err: {:#?}", err);
+                        eprintln!("err: {:#?}", err);
+                        break;
                     }
                     _ => {}
                 }
@@ -300,7 +308,7 @@ mod test {
             .messages()
             .model("claude-3-sonnet-20240229")
             .max_tokens(512)
-            .messages(Message::user("Hi, I'm John."))
+            .messages(Message::user(String::from("Hi, I'm John.")))
             .build()
             .unwrap()
             .stream()
