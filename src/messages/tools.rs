@@ -136,13 +136,13 @@ impl ToolBuilder {
     }
 
     pub fn add_property(mut self, property: Property) -> Self {
+        if property.required {
+            self.input_schema.required.push(property.name.clone());
+        }
+
         self.input_schema
             .properties
             .insert(property.name.clone(), property);
-
-        if property.required {
-            self.input_schema.required.push(property.name);
-        }
 
         self
     }
