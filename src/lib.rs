@@ -3,6 +3,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 pub mod messages;
+pub mod tools;
 const BASE_URL: &str = "https://api.anthropic.com";
 
 cfg_if::cfg_if! {
@@ -24,24 +25,15 @@ pub struct AnthropicBuilder {
     leaky_bucket: Option<RateLimiter>,
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "leaky-bucket")] {
-        #[derive(Clone, Derivative)]
-        #[derivative(Debug)]
-        pub struct Anthropic {
-            api_key: String,
-            version: String,
-            client: reqwest::Client,
-            #[derivative(Debug = "ignore")]
-            leaky_bucket: Option<Arc<RateLimiter>>,
-        }
-    } else {
-        #[derive(Clone, Debug)]
-        pub struct Anthropic {
-            api_key: String,
-            client: reqwest::Client,
-        }
-    }
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
+pub struct Anthropic {
+    api_key: String,
+    version: String,
+    client: reqwest::Client,
+    #[derivative(Debug = "ignore")]
+    #[cfg(feature = "leaky-bucket")]
+    leaky_bucket: Option<Arc<RateLimiter>>,
 }
 
 #[derive(Debug, Error)]

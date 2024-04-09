@@ -1,6 +1,8 @@
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 
+use super::tools::{ToolResult, ToolUse};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -9,33 +11,77 @@ pub enum Role {
 }
 
 #[derive(Debug, Serialize, Deserialize, Derivative, Clone)]
-#[derivative(Default)]
+#[serde(untagged)]
+pub enum MessageContent {
+    #[serde(rename = "content")]
+    Text(String),
+    #[serde(rename = "content")]
+    Multiple(Vec<MultimodalContent>),
+}
+
+impl From<String> for MessageContent {
+    fn from(content: String) -> Self {
+        MessageContent::Text(content)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Image {
+    pub source: ImageSource,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Text {
+    pub text: String,
+}
+
+impl From<String> for Text {
+    fn from(text: String) -> Self {
+        Text { text }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum MultimodalContent {
+    Text(Text),
+    Image(Image),
+    ToolUse(ToolUse),
+    ToolResult(ToolResult),
+}
+
+impl From<String> for MultimodalContent {
+    fn from(text: String) -> Self {
+        MultimodalContent::Text(text.into())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum ImageSource {
+    Base64 { media_type: String, data: String },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserMessage {
-    #[derivative(Default(value = "Role::User"))]
     pub role: Role,
-    pub content: String,
+    pub content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 impl UserMessage {
-    pub fn new(content: impl ToString) -> Self {
+    pub fn new<T: Into<MessageContent>>(content: T) -> Self {
         Self {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
         }
     }
 }
 
-impl From<UserMessage> for String {
-    fn from(message: UserMessage) -> Self {
-        message.content
-    }
-}
-
-impl From<&str> for UserMessage {
-    fn from(content: &str) -> Self {
+impl From<String> for UserMessage {
+    fn from(content: String) -> Self {
         UserMessage::new(content)
     }
 }
@@ -44,19 +90,24 @@ impl From<&str> for UserMessage {
 pub struct AssistantMessage {
     #[derivative(Default(value = "Role::Assistant"))]
     pub role: Role,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 impl AssistantMessage {
-    pub fn new(content: impl ToString) -> Self {
+    pub fn new<T: Into<MessageContent>>(content: T) -> Self {
         Self {
             role: Role::Assistant,
-            content: Some(content.to_string()),
+            content: content.into(),
             name: None,
         }
+    }
+}
+
+impl From<String> for AssistantMessage {
+    fn from(content: String) -> Self {
+        AssistantMessage::new(content)
     }
 }
 
@@ -69,16 +120,16 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn user(content: impl ToString) -> Self {
+    pub fn user<T: Into<MessageContent>>(content: T) -> Self {
         Message::User(UserMessage::new(content))
     }
-    pub fn assistant(content: impl ToString) -> Self {
+    pub fn assistant<T: Into<MessageContent>>(content: T) -> Self {
         Message::Assistant(AssistantMessage::new(content))
     }
-    pub fn content(&self) -> Option<String> {
+    pub fn content(&self) -> &MessageContent {
         match self {
-            Message::User(msg) => Some(msg.content.clone()),
-            Message::Assistant(msg) => msg.content.as_ref().cloned(),
+            Message::User(msg) => &msg.content,
+            Message::Assistant(msg) => &msg.content,
         }
     }
 }
@@ -118,7 +169,7 @@ where
     where
         I: IntoIterator<Item = T>,
     {
-        self.0.extend(iter.into_iter().map(|item| item.into()));
+        self.0.extend(iter.into_iter().map(Into::into));
     }
 }
 
