@@ -1,0 +1,24 @@
+{
+  "description": [
+    {
+      "command": [
+        "git",
+        "remote",
+        "get-url",
+        "origin"
+      ],
+      "regex": "https:\/\/github.com\/([^\/]+\/[^\/]+).*"
+    },
+    {
+      "text": ":"
+    },
+    {
+      "command": [
+        "git",
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD"
+      ]
+    }
+  ]
+}

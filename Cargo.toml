@@ -26,3 +26,4 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 reqwest-eventsource = "0.6"
 derivative = "2.2"
 cfg-if = "1.0.0"
+regex = "1.10.4"

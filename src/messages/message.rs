@@ -1,4 +1,7 @@
+use std::{collections::HashMap, str::FromStr};
+
 use derivative::Derivative;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::tools::{ToolResult, ToolUse};
@@ -178,5 +181,154 @@ impl IntoIterator for Messages {
     type IntoIter = std::vec::IntoIter<Self::Item>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct MessageBuilder {
+    variables: HashMap<String, String>,
+    content: Option<String>,
+    role: Option<Role>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MessageBuilderError {
+    #[error("Missing content")]
+    MissingContent,
+    #[error("Missing role")]
+    MissingRole,
+    #[error("Variable {0} not found")]
+    VariableNotFound(String),
+}
+
+impl MessageBuilder {
+    pub fn variable<T: ToString>(mut self, name: T, value: T) -> Self {
+        self.variables.insert(name.to_string(), value.to_string());
+        self
+    }
+    pub fn content<T: ToString>(mut self, content: T) -> Self {
+        self.content = Some(content.to_string());
+        self
+    }
+    pub fn role(mut self, role: Role) -> Self {
+        self.role = Some(role);
+        self
+    }
+    pub fn build(self) -> Result<Message, MessageBuilderError> {
+        let content = self.content.ok_or(MessageBuilderError::MissingContent)?;
+        let role = self.role.ok_or(MessageBuilderError::MissingRole)?;
+        let replaced_content = content.replace_variables(&self.variables)?;
+        match role {
+            Role::User => Ok(Message::user(replaced_content)),
+            Role::Assistant => Ok(Message::assistant(replaced_content)),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Variable {0} not found")]
+pub struct ReplaceVariableError(String);
+
+impl From<ReplaceVariableError> for MessageBuilderError {
+    fn from(value: ReplaceVariableError) -> Self {
+        MessageBuilderError::VariableNotFound(value.0)
+    }
+}
+
+trait ReplaceVariables: Sized {
+    fn replace_variables(
+        &self,
+        variables: &HashMap<String, String>,
+    ) -> Result<Self, ReplaceVariableError>;
+}
+
+impl<T: ?Sized + ToString + From<String>> ReplaceVariables for T {
+    fn replace_variables(
+        &self,
+        variables: &HashMap<String, String>,
+    ) -> Result<Self, ReplaceVariableError> {
+        let content = self.to_string();
+        let mut result = content.clone();
+
+        let re = Regex::new(r"\{\$([A-Za-z0-9_]+)\}").unwrap();
+        let placeholders = re
+            .captures_iter(&content)
+            .map(|cap| cap[1].to_string())
+            .collect::<Vec<_>>();
+
+        for placeholder in placeholders {
+            if let Some(value) = variables.get(&placeholder) {
+                let placeholder_str = format!(r"{{${}}}", placeholder);
+                result = result.replace(&placeholder_str, value);
+            } else {
+                return Err(ReplaceVariableError(placeholder));
+            }
+        }
+
+        Ok(Self::from(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_replace_variables_string_success() {
+        let input = "Hello, {$name}!";
+        let mut variables = HashMap::new();
+        variables.insert("name".to_string(), "Alice".to_string());
+
+        let result = input.to_string().replace_variables(&variables).unwrap();
+
+        assert_eq!(result, "Hello, Alice!");
+    }
+
+    #[test]
+    fn test_replace_variables_string_multiple_vars() {
+        let input = "{$greeting}, {$name}! You are {$age} years old.";
+        let mut variables = HashMap::new();
+        variables.insert("greeting".to_string(), "Hi".to_string());
+        variables.insert("name".to_string(), "Bob".to_string());
+        variables.insert("age".to_string(), "30".to_string());
+
+        let result = input.to_string().replace_variables(&variables).unwrap();
+
+        assert_eq!(result, "Hi, Bob! You are 30 years old.");
+    }
+
+    #[test]
+    fn test_replace_variables_string_no_vars() {
+        let input = "No variables here";
+        let variables = HashMap::new();
+
+        let result = input.to_string().replace_variables(&variables).unwrap();
+
+        assert_eq!(result, "No variables here");
+    }
+
+    #[test]
+    fn test_replace_variables_string_unused_var() {
+        let input = "Hello, {$name}!";
+        let mut variables = HashMap::new();
+        variables.insert("name".to_string(), "Alice".to_string());
+        variables.insert("unused".to_string(), "value".to_string());
+
+        let result = input.to_string().replace_variables(&variables).unwrap();
+
+        assert_eq!(result, "Hello, Alice!");
+    }
+
+    #[test]
+    fn test_replace_variables_missing_var() {
+        let input = "Hello, {$name}! You are {$age} years old.";
+        let mut variables = HashMap::new();
+        variables.insert("name".to_string(), "Alice".to_string());
+        let result = input.to_string().replace_variables(&variables);
+        match result {
+            Ok(_) => panic!("Expected an error but got Ok"),
+            Err(e) => assert_eq!(e.to_string(), "Variable age not found"),
+        }
     }
 }
