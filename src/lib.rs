@@ -16,7 +16,7 @@ cfg_if::cfg_if! {
 
 #[derive(Derivative)]
 #[derivative(Default)]
-pub struct AnthropicBuilder {
+pub struct ClientBuilder {
     api_key: Option<String>,
     #[derivative(Default(value = r#""2023-06-01".to_string()"#))]
     version: String,
@@ -27,7 +27,7 @@ pub struct AnthropicBuilder {
 
 #[derive(Clone, Derivative)]
 #[derivative(Debug)]
-pub struct Anthropic {
+pub struct Client {
     api_key: String,
     version: String,
     client: reqwest::Client,
@@ -37,48 +37,48 @@ pub struct Anthropic {
 }
 
 #[derive(Debug, Error)]
-pub enum AnthropicBuilderError {
+pub enum ClientBuilderError {
     #[error("API key not set")]
     ApiKeyNotSet,
 }
 
-impl Anthropic {
-    pub fn builder() -> AnthropicBuilder {
-        AnthropicBuilder::default()
+impl Client {
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::default()
     }
 
     pub fn messages(&self) -> MessagesRequestBuilder {
         MessagesRequestBuilder {
-            anthropic: Some(self.clone()),
+            client: Some(self.clone()),
             ..Default::default()
         }
     }
 }
 
-impl AnthropicBuilder {
+impl ClientBuilder {
     pub fn new() -> Self {
         Default::default()
     }
 
-    pub fn api_key(mut self, api_key: String) -> AnthropicBuilder {
+    pub fn api_key(mut self, api_key: String) -> ClientBuilder {
         self.api_key = Some(api_key);
         self
     }
 
-    pub fn client(mut self, client: &reqwest::Client) -> AnthropicBuilder {
+    pub fn client(mut self, client: &reqwest::Client) -> ClientBuilder {
         self.client = Some(client.clone());
         self
     }
 
     #[cfg(feature = "leaky-bucket")]
-    pub fn limiter(mut self, leaky_bucket: RateLimiter) -> AnthropicBuilder {
+    pub fn limiter(mut self, leaky_bucket: RateLimiter) -> ClientBuilder {
         self.leaky_bucket = Some(leaky_bucket);
         self
     }
 
-    pub fn build(self) -> Result<Anthropic, AnthropicBuilderError> {
+    pub fn build(self) -> Result<Client, ClientBuilderError> {
         let Some(api_key) = self.api_key else {
-            return Err(AnthropicBuilderError::ApiKeyNotSet);
+            return Err(ClientBuilderError::ApiKeyNotSet);
         };
 
         let client = self.client.unwrap_or_default();
@@ -86,7 +86,7 @@ impl AnthropicBuilder {
         #[cfg(feature = "leaky-bucket")]
         let leaky_bucket = self.leaky_bucket.map(Arc::new);
 
-        Ok(Anthropic {
+        Ok(Client {
             api_key,
             version: self.version,
             client,

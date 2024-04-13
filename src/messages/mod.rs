@@ -10,7 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_stream::{wrappers::LinesStream, Stream, StreamExt};
 
-use crate::{Anthropic, ApiRequestError, ErrorResponse, BASE_URL};
+use crate::{ApiRequestError, Client, ErrorResponse, BASE_URL};
 
 use self::message::{Message, Messages};
 
@@ -34,7 +34,7 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
     #[serde(skip)]
-    pub anthropic: Anthropic,
+    pub anthropic: Client,
 }
 
 #[derive(Debug, Default)]
@@ -48,7 +48,7 @@ pub struct MessagesRequestBuilder {
     pub(crate) temperature: Option<f32>,
     pub(crate) top_p: Option<f32>,
     pub(crate) top_k: Option<i32>,
-    pub(crate) anthropic: Option<Anthropic>,
+    pub(crate) client: Option<Client>,
 }
 
 #[derive(Debug, Error)]
@@ -122,8 +122,8 @@ impl MessagesRequestBuilder {
         self
     }
 
-    pub fn anthropic(mut self, anthropic: Anthropic) -> Self {
-        self.anthropic = Some(anthropic);
+    pub fn anthropic(mut self, anthropic: Client) -> Self {
+        self.client = Some(anthropic);
         self
     }
 
@@ -143,7 +143,7 @@ impl MessagesRequestBuilder {
             top_p: self.top_p,
             top_k: self.top_k,
             anthropic: self
-                .anthropic
+                .client
                 .ok_or(MessagesRequestBuilderError::ClientNotSet)?,
         })
     }
@@ -292,14 +292,14 @@ mod test {
 
     use crate::{
         messages::{message::Messages, Message},
-        AnthropicBuilder,
+        ClientBuilder,
     };
 
     #[tokio::test]
     async fn test_messages_request_builder() {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
         let client = reqwest::Client::new();
-        let anthropic = AnthropicBuilder::default()
+        let anthropic = ClientBuilder::default()
             .api_key(api_key)
             .client(&client)
             .build()
