@@ -12,13 +12,18 @@ use tokio_stream::{wrappers::LinesStream, Stream, StreamExt};
 
 use crate::{ApiRequestError, Client, ErrorResponse, BASE_URL};
 
-use self::message::{Message, Messages};
+use self::{
+    message::{Message, Messages},
+    tools::{Tool, Tools},
+};
 
 const API_URL: &str = "v1/messages";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagesRequest {
     pub messages: Messages,
+    #[serde(skip_serializing_if = "Tools::is_empty")]
+    pub tools: Tools,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -40,6 +45,7 @@ pub struct MessagesRequest {
 #[derive(Debug, Default)]
 pub struct MessagesRequestBuilder {
     pub(crate) messages: Option<Messages>,
+    pub(crate) tools: Option<Tools>,
     pub(crate) model: Option<String>,
     pub(crate) system: Option<String>,
     pub(crate) max_tokens: Option<u32>,
@@ -78,6 +84,20 @@ impl MessagesRequestBuilder {
             messages.push_message(message);
         } else {
             self.messages = Some(Messages::from(message.into()));
+        }
+        self
+    }
+
+    pub fn tools<T: Into<Tools>>(mut self, tools: T) -> Self {
+        self.tools = Some(tools.into());
+        self
+    }
+
+    pub fn add_tool<T: Into<Tool>>(mut self, tool: T) -> Self {
+        if let Some(ref mut tools) = self.tools {
+            tools.push_tool(tool.into());
+        } else {
+            self.tools = Some(Tools::from(tool.into()));
         }
         self
     }
@@ -132,6 +152,7 @@ impl MessagesRequestBuilder {
             messages: self
                 .messages
                 .ok_or(MessagesRequestBuilderError::MessagesNotSet)?,
+            tools: self.tools.unwrap_or_default(),
             model: self.model.ok_or(MessagesRequestBuilderError::ModelNotSet)?,
             system: self.system,
             max_tokens: self

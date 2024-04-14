@@ -297,10 +297,13 @@ impl Tools {
         Tools::default()
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn add(mut self, tool: Tool) -> Self {
+    pub fn add_tool(mut self, tool: Tool) -> Self {
         self.tools.insert(tool.name.clone(), tool);
         self
+    }
+
+    pub fn push_tool(&mut self, tool: Tool) {
+        self.tools.insert(tool.name.clone(), tool);
     }
 
     pub fn get(&self, tool_name: &str) -> Option<&Tool> {
@@ -316,6 +319,16 @@ impl Tools {
         } else {
             None
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
+impl From<Tool> for Tools {
+    fn from(tool: Tool) -> Self {
+        Tools::new().add_tool(tool)
     }
 }
 
