@@ -206,8 +206,7 @@ impl MessagesRequest {
     }
     pub async fn send(&self) -> Result<MessagesResponse, ApiRequestError> {
         let url = format!("{}/{}", BASE_URL, API_URL);
-        let mut body = serde_json::to_value(self).unwrap();
-        body["stream"] = serde_json::Value::Bool(true);
+        let body = serde_json::to_value(self).unwrap();
         let req = self
             .anthropic
             .client
@@ -296,7 +295,7 @@ mod test {
     };
 
     #[tokio::test]
-    async fn test_messages_request_builder() {
+    async fn test_messages_stream_request_builder() {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
         let client = reqwest::Client::new();
         let anthropic = ClientBuilder::default()
@@ -317,5 +316,25 @@ mod test {
         while let Some(res) = res.next().await {
             print!("{}", res);
         }
+    }
+    #[tokio::test]
+    async fn test_messages_request_builder() {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+        let client = reqwest::Client::new();
+        let anthropic = ClientBuilder::default()
+            .api_key(api_key)
+            .client(&client)
+            .build()
+            .unwrap();
+        let mut res = anthropic
+            .messages()
+            .model("claude-3-sonnet-20240229")
+            .max_tokens(512)
+            .messages(Message::user(String::from("Hi, I'm John.")))
+            .build()
+            .unwrap()
+            .send()
+            .await;
+        dbg!(res);
     }
 }
