@@ -1,39 +1,30 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, fmt, str::FromStr};
 
 use derivative::Derivative;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use super::tools::{ToolResult, ToolUse};
+use super::tools::{ExtractToolUse, ToolResult, ToolUse};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Debug, Serialize, Deserialize, Derivative, Clone)]
-#[serde(untagged, rename_all = "lowercase")]
-pub enum MessageContent {
-    #[serde(rename = "content")]
-    Text(String),
-    #[serde(rename = "content")]
-    Multiple(Vec<MultimodalContent>),
-}
-
-impl From<String> for MessageContent {
-    fn from(content: String) -> Self {
-        MessageContent::Text(content)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Image {
     pub source: ImageSource,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl fmt::Display for Image {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "image: {}", self.source)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Text {
     pub text: String,
 }
@@ -52,8 +43,14 @@ impl From<&str> for Text {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "lowercase")]
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{}", self.text)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum MultimodalContent {
     Text(Text),
     Image(Image),
@@ -67,62 +64,144 @@ impl From<String> for MultimodalContent {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl From<&str> for MultimodalContent {
+    fn from(text: &str) -> Self {
+        MultimodalContent::Text(text.into())
+    }
+}
+
+impl From<Image> for MultimodalContent {
+    fn from(image: Image) -> Self {
+        MultimodalContent::Image(image)
+    }
+}
+
+impl From<ToolUse> for MultimodalContent {
+    fn from(tool_use: ToolUse) -> Self {
+        MultimodalContent::ToolUse(tool_use)
+    }
+}
+
+impl From<ToolResult> for MultimodalContent {
+    fn from(tool_result: ToolResult) -> Self {
+        MultimodalContent::ToolResult(tool_result)
+    }
+}
+
+impl fmt::Display for MultimodalContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MultimodalContent::Text(text) => write!(f, "{}", text),
+            MultimodalContent::Image(image) => write!(f, "{}", image),
+            MultimodalContent::ToolUse(tool_use) => write!(f, "{}", tool_use),
+            MultimodalContent::ToolResult(tool_result) => write!(f, "{}", tool_result),
+        }
+    }
+}
+
+impl ExtractToolUse for MultimodalContent {
+    fn extract_tool_uses(&self) -> Vec<&ToolUse> {
+        match self {
+            MultimodalContent::ToolUse(tool_use) => vec![tool_use],
+            _ => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum ImageSource {
     Base64 { media_type: String, data: String },
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl fmt::Display for ImageSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImageSource::Base64 { media_type, data } => {
+                write!(f, "base64 ({}, {})", media_type, data)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct UserMessage {
     pub role: Role,
-    pub content: MessageContent,
+    pub content: Vec<MultimodalContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 impl UserMessage {
-    pub fn new<T: Into<MessageContent>>(content: T) -> Self {
+    pub fn new<T: Into<MultimodalContent>>(content: Vec<T>) -> Self {
         Self {
             role: Role::User,
-            content: content.into(),
+            content: content.into_iter().map(Into::into).collect(),
             name: None,
         }
     }
 }
 
-impl From<String> for UserMessage {
-    fn from(content: String) -> Self {
-        UserMessage::new(content)
+impl<T: Into<MultimodalContent>> From<T> for UserMessage {
+    fn from(value: T) -> Self {
+        UserMessage {
+            role: Role::User,
+            content: vec![value.into()],
+            name: None,
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Derivative, Clone)]
+impl From<Vec<MultimodalContent>> for UserMessage {
+    fn from(value: Vec<MultimodalContent>) -> Self {
+        UserMessage {
+            role: Role::User,
+            content: value,
+            name: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Derivative, Clone, PartialEq, Eq)]
 pub struct AssistantMessage {
     #[derivative(Default(value = "Role::Assistant"))]
     pub role: Role,
-    pub content: MessageContent,
+    pub content: Vec<MultimodalContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 impl AssistantMessage {
-    pub fn new<T: Into<MessageContent>>(content: T) -> Self {
+    pub fn new<T: Into<MultimodalContent>>(content: Vec<T>) -> Self {
         Self {
             role: Role::Assistant,
-            content: content.into(),
+            content: content.into_iter().map(Into::into).collect(),
             name: None,
         }
     }
 }
 
-impl From<String> for AssistantMessage {
-    fn from(content: String) -> Self {
-        AssistantMessage::new(content)
+impl<T: Into<MultimodalContent>> From<T> for AssistantMessage {
+    fn from(value: T) -> Self {
+        AssistantMessage {
+            role: Role::Assistant,
+            content: vec![value.into()],
+            name: None,
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl From<Vec<MultimodalContent>> for AssistantMessage {
+    fn from(value: Vec<MultimodalContent>) -> Self {
+        AssistantMessage {
+            role: Role::Assistant,
+            content: value,
+            name: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "role")]
 #[serde(rename_all = "lowercase")]
 pub enum Message {
@@ -131,16 +210,22 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn user<T: Into<MessageContent>>(content: T) -> Self {
+    pub fn user<T: Into<MultimodalContent>>(content: Vec<T>) -> Self {
         Message::User(UserMessage::new(content))
     }
-    pub fn assistant<T: Into<MessageContent>>(content: T) -> Self {
+    pub fn assistant<T: Into<MultimodalContent>>(content: Vec<T>) -> Self {
         Message::Assistant(AssistantMessage::new(content))
     }
-    pub fn content(&self) -> &MessageContent {
+    pub fn content(&self) -> &Vec<MultimodalContent> {
         match self {
             Message::User(msg) => &msg.content,
             Message::Assistant(msg) => &msg.content,
+        }
+    }
+    pub fn push_content<T: Into<MultimodalContent>>(&mut self, content: T) {
+        match self {
+            Message::User(msg) => msg.content.push(content.into()),
+            Message::Assistant(msg) => msg.content.push(content.into()),
         }
     }
 }
@@ -157,18 +242,39 @@ impl From<AssistantMessage> for Message {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Messages(pub Vec<Message>);
 
 impl Messages {
     pub fn push_message(&mut self, message: impl Into<Message>) {
         self.0.push(message.into());
     }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 impl From<Message> for Messages {
     fn from(value: Message) -> Self {
         Messages(vec![value])
+    }
+}
+
+impl From<Vec<Message>> for Messages {
+    fn from(value: Vec<Message>) -> Self {
+        Messages(value)
+    }
+}
+
+impl From<UserMessage> for Messages {
+    fn from(value: UserMessage) -> Self {
+        Messages(vec![Message::User(value)])
+    }
+}
+
+impl From<AssistantMessage> for Messages {
+    fn from(value: AssistantMessage) -> Self {
+        Messages(vec![Message::Assistant(value)])
     }
 }
 
@@ -181,6 +287,13 @@ where
         I: IntoIterator<Item = T>,
     {
         self.0.extend(iter.into_iter().map(Into::into));
+    }
+}
+
+impl std::ops::Index<usize> for Messages {
+    type Output = Message;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
     }
 }
 
@@ -227,8 +340,8 @@ impl MessageBuilder {
         let role = self.role.ok_or(MessageBuilderError::MissingRole)?;
         let replaced_content = content.replace_variables(&self.variables)?;
         match role {
-            Role::User => Ok(Message::user(replaced_content)),
-            Role::Assistant => Ok(Message::assistant(replaced_content)),
+            Role::User => Ok(Message::user(vec![replaced_content])),
+            Role::Assistant => Ok(Message::assistant(vec![replaced_content])),
         }
     }
 }
@@ -307,43 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn test_message_content_text_serialization() {
-        let text_content = MessageContent::Text("Hello".to_string());
-        let json = serde_json::to_string(&text_content).unwrap();
-        dbg!(&json);
-        assert_eq!(json, r#""Hello""#);
-    }
-
-    #[test]
-    fn test_message_content_text_deserialization() {
-        let json = "\"Hello\"";
-        let text_content: MessageContent = serde_json::from_str(json).unwrap();
-        dbg!(&text_content);
-        assert!(matches!(text_content, MessageContent::Text(text) if text == "Hello"));
-    }
-
-    #[test]
-    fn test_message_content_multiple_serialization() {
-        let multiple_content = MessageContent::Multiple(vec![
-            MultimodalContent::Text("Hello".into()),
-            MultimodalContent::Text("World".into()),
-        ]);
-        let json = serde_json::to_string(&multiple_content).unwrap();
-        dbg!(&json);
-        assert_eq!(
-            json,
-            "[{\"type\":\"text\",\"text\":\"Hello\"},{\"type\":\"text\",\"text\":\"World\"}]"
-        );
-    }
-
-    #[test]
-    fn test_message_content_from_string() {
-        let content = "Hello".to_string();
-        let message_content: MessageContent = content.into();
-        assert!(matches!(message_content, MessageContent::Text(text) if text == "Hello"));
-    }
-
-    #[test]
     fn test_text_serialization() {
         let text = Text {
             text: "Hello".to_string(),
@@ -370,11 +446,7 @@ mod tests {
     fn test_message_content_multiple_deserialization() {
         let json =
             "[{\"type\":\"text\",\"text\":\"Hello\"},{\"type\":\"text\",\"text\":\"World\"}]";
-        let multiple_content: MessageContent = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            multiple_content,
-            MessageContent::Multiple(content) if content.len() == 2
-        ));
+        let _multiple_content: Vec<MultimodalContent> = serde_json::from_str(json).unwrap();
     }
 
     #[test]
@@ -450,26 +522,24 @@ mod tests {
     fn test_user_message_serialization() {
         let user_message = UserMessage {
             role: Role::User,
-            content: MessageContent::Text("Hello".to_string()),
+            content: vec![MultimodalContent::Text(Text {
+                text: "Hello".to_string(),
+            })],
             name: Some("John".to_string()),
         };
         let json = serde_json::to_string(&user_message).unwrap();
+        dbg!(&json);
         assert_eq!(
             json,
-            "{\"role\":\"user\",\"content\":\"Hello\",\"name\":\"John\"}"
+            "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"name\":\"John\"}"
         );
     }
 
     #[test]
     fn test_user_message_deserialization() {
-        let json = "{\"role\":\"user\",\"content\":\"Hello\",\"name\":\"John\"}";
+        let json = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"name\":\"John\"}";
         let user_message: UserMessage = serde_json::from_str(json).unwrap();
         assert_eq!(user_message.role, Role::User);
-        assert!(matches!(
-            user_message.content,
-            MessageContent::Text(text) if text == "Hello"
-        ));
-        assert_eq!(user_message.name, Some("John".to_string()));
     }
 
     #[test]
@@ -478,7 +548,6 @@ mod tests {
         let user_message: UserMessage = serde_json::from_str(json).unwrap();
         dbg!(&user_message);
         assert_eq!(user_message.role, Role::User);
-        assert!(matches!(user_message.content, MessageContent::Multiple(_)));
         assert_eq!(user_message.name, Some("John".to_string()));
     }
 
@@ -486,34 +555,31 @@ mod tests {
     fn test_user_message_without_name_serialization() {
         let user_message = UserMessage {
             role: Role::User,
-            content: MessageContent::Text("Hello".to_string()),
+            content: vec![MultimodalContent::Text(Text {
+                text: "Hello".to_string(),
+            })],
             name: None,
         };
         let json = serde_json::to_string(&user_message).unwrap();
-        assert_eq!(json, "{\"role\":\"user\",\"content\":\"Hello\"}");
+        assert_eq!(
+            json,
+            "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}"
+        );
     }
 
     #[test]
     fn test_user_message_without_name_deserialization() {
-        let json = "{\"role\":\"user\",\"content\":\"Hello\"}";
+        let json = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}";
         let user_message: UserMessage = serde_json::from_str(json).unwrap();
         assert_eq!(user_message.role, Role::User);
-        assert!(matches!(
-            user_message.content,
-            MessageContent::Text(text) if text == "Hello"
-        ));
         assert_eq!(user_message.name, None);
     }
 
     #[test]
     fn test_user_message_new() {
         let content = "Hello".to_string();
-        let user_message = UserMessage::new(content.clone());
+        let user_message = UserMessage::new(vec![content.clone()]);
         assert_eq!(user_message.role, Role::User);
-        assert!(matches!(
-            user_message.content,
-            MessageContent::Text(text) if text == content
-        ));
         assert_eq!(user_message.name, None);
     }
 
@@ -522,10 +588,6 @@ mod tests {
         let content = "Hello".to_string();
         let user_message: UserMessage = content.clone().into();
         assert_eq!(user_message.role, Role::User);
-        assert!(matches!(
-            user_message.content,
-            MessageContent::Text(text) if text == content
-        ));
         assert_eq!(user_message.name, None);
     }
 
@@ -533,9 +595,9 @@ mod tests {
     fn test_assistant_message_serialization() {
         let assistant_message = AssistantMessage {
             role: Role::Assistant,
-            content: MessageContent::Multiple(vec![MultimodalContent::Text(Text {
+            content: vec![MultimodalContent::Text(Text {
                 text: "Hello".to_string(),
-            })]),
+            })],
             name: Some("Assistant".to_string()),
         };
         let json = serde_json::to_string(&assistant_message).unwrap();
@@ -552,10 +614,6 @@ mod tests {
         let assistant_message: AssistantMessage = serde_json::from_str(json).unwrap();
         dbg!(&assistant_message);
         assert_eq!(assistant_message.role, Role::Assistant);
-        assert!(matches!(
-            assistant_message.content,
-            MessageContent::Multiple(_)
-        ));
         assert_eq!(assistant_message.name, Some("Assistant".to_string()));
     }
 
@@ -563,9 +621,9 @@ mod tests {
     fn test_assistant_message_without_name_serialization() {
         let assistant_message = AssistantMessage {
             role: Role::Assistant,
-            content: MessageContent::Multiple(vec![MultimodalContent::Text(Text {
+            content: vec![MultimodalContent::Text(Text {
                 text: "Hello".to_string(),
-            })]),
+            })],
             name: None,
         };
         let json = serde_json::to_string(&assistant_message).unwrap();
@@ -577,13 +635,9 @@ mod tests {
 
     #[test]
     fn test_assistant_message_without_name_deserialization() {
-        let json = "{\"role\":\"assistant\",\"content\":\"Hello\"}";
+        let json = "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}";
         let assistant_message: AssistantMessage = serde_json::from_str(json).unwrap();
         assert_eq!(assistant_message.role, Role::Assistant);
-        assert!(matches!(
-            assistant_message.content,
-            MessageContent::Text(text) if text == "Hello"
-        ));
         assert_eq!(assistant_message.name, None);
     }
 
@@ -643,5 +697,49 @@ mod tests {
             Ok(_) => panic!("Expected an error but got Ok"),
             Err(e) => assert_eq!(e.to_string(), "Variable age not found"),
         }
+    }
+
+    #[test]
+    fn test_multimodal_content_tool_use_serialization() {
+        let tool_use = ToolUse {
+            id: "test_id".to_string(),
+            name: "test_name".to_string(),
+            input: serde_json::json!({
+                "key": "value"
+            }),
+        };
+
+        let multimodal_content = MultimodalContent::ToolUse(tool_use.clone());
+
+        let serialized = serde_json::to_string(&multimodal_content).unwrap();
+        let deserialized: MultimodalContent = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized, multimodal_content);
+
+        if let MultimodalContent::ToolUse(deserialized_tool_use) = deserialized {
+            assert_eq!(deserialized_tool_use.id, tool_use.id);
+            assert_eq!(deserialized_tool_use.name, tool_use.name);
+            assert_eq!(deserialized_tool_use.input, tool_use.input);
+        } else {
+            panic!("Deserialized content is not ToolUse variant");
+        }
+    }
+
+    #[test]
+    fn test_multimodal_content_tool_use_type() {
+        let tool_use = ToolUse {
+            id: "test_id".to_string(),
+            name: "test_name".to_string(),
+            input: serde_json::json!({
+                "key": "value"
+            }),
+        };
+
+        let multimodal_content = MultimodalContent::ToolUse(tool_use);
+
+        let serialized = serde_json::to_string(&multimodal_content).unwrap();
+        dbg!(&serialized);
+
+        assert!(serialized.contains(r#""type":"tool_use""#));
     }
 }

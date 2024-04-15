@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
@@ -6,8 +7,13 @@ use std::{
     fmt,
     future::Future,
     marker::PhantomData,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
+
+use super::message::MultimodalContent;
+
+const NAME_REGEX_PATTERN: &str = r"^[a-zA-Z0-9_-]{1,64}$";
+static NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -21,9 +27,11 @@ pub enum ValueType {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Property {
+    #[serde(skip)]
     name: String,
     #[serde(rename = "type")]
     value_type: ValueType,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip)]
     required: bool,
@@ -100,10 +108,10 @@ impl Default for InputSchema {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Missing property: {0}")]
-    MissingProperty(String),
-    #[error("Invalid property type: {0}")]
-    InvalidPropertyType(String),
+    #[error("Missing properties: {0:?}")]
+    MissingProperties(Vec<String>),
+    #[error("Invalid property types: {0:?}")]
+    InvalidPropertyTypes(Vec<(String, String)>),
 }
 
 #[derive(Debug)]
@@ -118,6 +126,8 @@ pub struct ToolBuilder {
 pub enum BuildToolError {
     #[error("Tool handler is missing")]
     MissingHandler,
+    #[error("Tool name is invalid: {0}")]
+    InvalidName(String),
 }
 
 impl ToolBuilder {
@@ -162,6 +172,13 @@ impl ToolBuilder {
 
     pub fn build(self) -> Result<Tool, BuildToolError> {
         let handler = self.handler.ok_or(BuildToolError::MissingHandler)?;
+        let name_regex = NAME_REGEX
+            .get_or_init(|| Regex::new(NAME_REGEX_PATTERN).unwrap())
+            .clone();
+
+        if !name_regex.is_match(&self.name) {
+            return Err(BuildToolError::InvalidName(self.name.to_owned()));
+        }
 
         Ok(Tool {
             name: self.name,
@@ -175,56 +192,78 @@ impl ToolBuilder {
 #[derive(Debug, Clone, Serialize)]
 pub struct Tool {
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     input_schema: InputSchema,
     #[serde(skip)]
     handler: Arc<dyn ToolHandlerFn>,
 }
 
+impl PartialEq for Tool {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for Tool {}
+
 impl Tool {
     pub fn validate_input(&self, input: &serde_json::Value) -> Result<(), ValidationError> {
         if let Some(input_obj) = input.as_object() {
+            let mut missing_props = Vec::new();
+            let mut invalid_types = Vec::new();
+
             for (name, property) in &self.input_schema.properties {
                 if property.required && !input_obj.contains_key(name) {
-                    return Err(ValidationError::MissingProperty(name.to_string()));
+                    missing_props.push(name.to_string());
                 }
                 if let Some(value) = input_obj.get(name) {
                     match property.value_type {
                         ValueType::String => {
                             if !value.is_string() {
-                                return Err(ValidationError::InvalidPropertyType(name.to_string()));
+                                invalid_types.push((name.to_string(), "string".to_string()));
                             }
                         }
                         ValueType::Number => {
                             if !value.is_number() {
-                                return Err(ValidationError::InvalidPropertyType(name.to_string()));
+                                invalid_types.push((name.to_string(), "number".to_string()));
                             }
                         }
                         ValueType::Boolean => {
                             if !value.is_boolean() {
-                                return Err(ValidationError::InvalidPropertyType(name.to_string()));
+                                invalid_types.push((name.to_string(), "boolean".to_string()));
                             }
                         }
                         ValueType::Array => {
                             if !value.is_array() {
-                                return Err(ValidationError::InvalidPropertyType(name.to_string()));
+                                invalid_types.push((name.to_string(), "array".to_string()));
                             }
                         }
                         ValueType::Object => {
                             if !value.is_object() {
-                                return Err(ValidationError::InvalidPropertyType(name.to_string()));
+                                invalid_types.push((name.to_string(), "object".to_string()));
                             }
                         }
                     }
                 }
             }
+
+            if !missing_props.is_empty() {
+                return Err(ValidationError::MissingProperties(missing_props));
+            }
+            if !invalid_types.is_empty() {
+                return Err(ValidationError::InvalidPropertyTypes(invalid_types));
+            }
+
             Ok(())
         } else {
-            Err(ValidationError::InvalidPropertyType(
-                "Input must be an object".to_string(),
-            ))
+            Err(ValidationError::InvalidPropertyTypes(vec![(
+                "input".to_string(),
+                "object".to_string(),
+            )]))
         }
     }
+
     pub async fn call<T: ToString>(
         &self,
         id: T,
@@ -332,18 +371,48 @@ impl From<Tool> for Tools {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolUse {
-    id: String,
-    name: String,
-    input: serde_json::Value,
+impl From<Vec<Tool>> for Tools {
+    fn from(tools: Vec<Tool>) -> Self {
+        let mut tools_map = Tools::new();
+        for tool in tools {
+            tools_map.push_tool(tool);
+        }
+        tools_map
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+impl fmt::Display for ToolUse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "tool_use: {}, name: {}, input: {}",
+            self.id, self.name, self.input
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolResult {
     #[serde(rename = "tool_use_id")]
-    id: String,
-    content: serde_json::Value,
+    pub id: String,
+    pub content: serde_json::Value,
+}
+
+impl fmt::Display for ToolResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "tool_result: {}, content: {}", self.id, self.content)
+    }
+}
+
+pub trait ExtractToolUse {
+    fn extract_tool_uses(&self) -> Vec<&ToolUse>;
 }
 
 #[async_trait]
@@ -543,20 +612,21 @@ mod tests {
     fn test_validate_input_missing_required() {
         let tool = ToolBuilder::new("user_create")
             .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
+            .add_property(Property::new("email").string_type().required())
             .add_property(Property::new("age").number_type())
             .handler(empty_handler)
             .build()
             .unwrap();
-
         let input = serde_json::json!({
-            "email": "john@example.com",
             "age": 30
         });
-
         match tool.validate_input(&input) {
-            Err(ValidationError::MissingProperty(prop)) => assert_eq!(prop, "name"),
-            _ => panic!("Expected MissingProperty error"),
+            Err(ValidationError::MissingProperties(props)) => {
+                assert_eq!(props.len(), 2);
+                assert!(props.contains(&"name".to_string()));
+                assert!(props.contains(&"email".to_string()));
+            }
+            _ => panic!("Expected MissingProperties error"),
         }
     }
 
@@ -569,16 +639,18 @@ mod tests {
             .handler(empty_handler)
             .build()
             .unwrap();
-
         let input = serde_json::json!({
             "name": "John Doe",
             "email": 123,
             "age": "30"
         });
-
         match tool.validate_input(&input) {
-            Err(ValidationError::InvalidPropertyType(prop)) => assert_eq!(prop, "email"),
-            _ => panic!("Expected InvalidPropertyType error"),
+            Err(ValidationError::InvalidPropertyTypes(props)) => {
+                assert_eq!(props.len(), 2);
+                assert!(props.contains(&("email".to_string(), "string".to_string())));
+                assert!(props.contains(&("age".to_string(), "number".to_string())));
+            }
+            _ => panic!("Expected InvalidPropertyTypes error"),
         }
     }
 
@@ -588,14 +660,13 @@ mod tests {
             .handler(empty_handler)
             .build()
             .unwrap();
-
         let input = serde_json::json!("invalid");
-
         match tool.validate_input(&input) {
-            Err(ValidationError::InvalidPropertyType(msg)) => {
-                assert_eq!(msg, "Input must be an object")
+            Err(ValidationError::InvalidPropertyTypes(props)) => {
+                assert_eq!(props.len(), 1);
+                assert_eq!(props[0], ("input".to_string(), "object".to_string()));
             }
-            _ => panic!("Expected InvalidPropertyType error"),
+            _ => panic!("Expected InvalidPropertyTypes error"),
         }
     }
 

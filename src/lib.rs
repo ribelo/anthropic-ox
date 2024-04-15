@@ -60,8 +60,8 @@ impl ClientBuilder {
         Default::default()
     }
 
-    pub fn api_key(mut self, api_key: String) -> ClientBuilder {
-        self.api_key = Some(api_key);
+    pub fn api_key<T: ToString>(mut self, api_key: T) -> ClientBuilder {
+        self.api_key = Some(api_key.to_string());
         self
     }
 
