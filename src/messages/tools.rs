@@ -7,7 +7,7 @@ use std::{
     fmt,
     future::Future,
     marker::PhantomData,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use super::message::MultimodalContent;
@@ -15,110 +15,312 @@ use super::message::MultimodalContent;
 const NAME_REGEX_PATTERN: &str = r"^[a-zA-Z0-9_-]{1,64}$";
 static NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ValueType {
-    String,
-    Number,
-    Boolean,
-    Array,
-    Object,
-}
+#[derive(Debug, Clone, Serialize, thiserror::Error)]
+#[error("Invalid key name: {0}")]
+pub struct PropertyNameError(String);
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Property {
-    #[serde(skip)]
-    name: String,
-    #[serde(rename = "type")]
-    value_type: ValueType,
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct StringProperty {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    #[serde(skip)]
-    required: bool,
+    #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
+    enumerate: Option<Vec<String>>,
+}
+
+impl StringProperty {
+    pub fn description<T: Into<String>>(mut self, description: T) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+    pub fn enumerate<T: IntoIterator<Item = U>, U: Into<String>>(mut self, enumerate: T) -> Self {
+        self.enumerate = Some(enumerate.into_iter().map(|s| s.into()).collect());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct NumberProperty {
+    description: Option<String>,
+}
+
+impl NumberProperty {
+    pub fn description<T: Into<String>>(mut self, description: T) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct BooleanProperty {
+    description: Option<String>,
+}
+
+impl BooleanProperty {
+    pub fn description<T: Into<String>>(mut self, description: T) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ArrayProperty {
+    description: Option<String>,
+    items: Vec<Box<Property>>,
+}
+
+impl ArrayProperty {
+    pub fn description<T: Into<String>>(mut self, description: T) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+    pub fn items(mut self, items: Vec<Box<Property>>) -> Self {
+        self.items = items;
+        self
+    }
+    pub fn push_item(mut self, item: Box<Property>) -> Self {
+        self.items.push(item);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ObjectProperty {
+    description: Option<String>,
+    required: Vec<String>,
+    properties: HashMap<String, Box<Property>>,
+}
+
+impl ObjectProperty {
+    pub fn description<T: Into<String>>(mut self, description: T) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+    pub fn required(mut self, required: Vec<String>) -> Self {
+        self.required = required;
+        self
+    }
+    pub fn properties(mut self, properties: HashMap<String, Box<Property>>) -> Self {
+        self.properties = properties;
+        self
+    }
+    pub fn insert_property(
+        &mut self,
+        name: &str,
+        is_required: bool,
+        property: Property,
+    ) -> Result<(), PropertyNameError> {
+        let regex = NAME_REGEX.get_or_init(|| Regex::new(NAME_REGEX_PATTERN).unwrap());
+        if !regex.is_match(name) {
+            return Err(PropertyNameError(name.to_string()));
+        }
+        self.properties.insert(name.to_string(), Box::new(property));
+        if is_required {
+            self.required.push(name.to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Property {
+    String(StringProperty),
+    Number(NumberProperty),
+    Boolean(BooleanProperty),
+    Array(ArrayProperty),
+    Object(ObjectProperty),
+}
+
+impl From<StringProperty> for Property {
+    fn from(prop: StringProperty) -> Self {
+        Property::String(prop)
+    }
+}
+
+impl From<NumberProperty> for Property {
+    fn from(prop: NumberProperty) -> Self {
+        Property::Number(prop)
+    }
+}
+
+impl From<BooleanProperty> for Property {
+    fn from(prop: BooleanProperty) -> Self {
+        Property::Boolean(prop)
+    }
+}
+
+impl From<ArrayProperty> for Property {
+    fn from(prop: ArrayProperty) -> Self {
+        Property::Array(prop)
+    }
+}
+
+impl From<ObjectProperty> for Property {
+    fn from(prop: ObjectProperty) -> Self {
+        Property::Object(prop)
+    }
 }
 
 impl Property {
-    pub fn new(name: &str) -> Self {
-        Property {
-            name: name.to_string(),
-            value_type: ValueType::String,
-            description: None,
-            required: false,
+    pub fn string() -> Self {
+        StringProperty::default().into()
+    }
+    pub fn number() -> Self {
+        NumberProperty::default().into()
+    }
+    pub fn boolean() -> Self {
+        BooleanProperty::default().into()
+    }
+    pub fn array() -> Self {
+        ArrayProperty::default().into()
+    }
+    pub fn object() -> Self {
+        ObjectProperty::default().into()
+    }
+    pub fn as_string(&self) -> Option<&StringProperty> {
+        match self {
+            Property::String(prop) => Some(prop),
+            _ => None,
         }
     }
-
-    pub fn value_type(mut self, value_type: ValueType) -> Self {
-        self.value_type = value_type;
-        self
+    pub fn as_number(&self) -> Option<&NumberProperty> {
+        match self {
+            Property::Number(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn string_type(mut self) -> Self {
-        self.value_type = ValueType::String;
-        self
+    pub fn as_boolean(&self) -> Option<&BooleanProperty> {
+        match self {
+            Property::Boolean(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn number_type(mut self) -> Self {
-        self.value_type = ValueType::Number;
-        self
+    pub fn as_array(&self) -> Option<&ArrayProperty> {
+        match self {
+            Property::Array(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn boolean_type(mut self) -> Self {
-        self.value_type = ValueType::Boolean;
-        self
+    pub fn as_object(&self) -> Option<&ObjectProperty> {
+        match self {
+            Property::Object(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn array_type(mut self) -> Self {
-        self.value_type = ValueType::Array;
-        self
+    pub fn as_string_mut(&mut self) -> Option<&mut StringProperty> {
+        match self {
+            Property::String(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn object_type(mut self) -> Self {
-        self.value_type = ValueType::Object;
-        self
+    pub fn as_number_mut(&mut self) -> Option<&mut NumberProperty> {
+        match self {
+            Property::Number(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn description(mut self, description: &str) -> Self {
-        self.description = Some(description.to_string());
-        self
+    pub fn as_boolean_mut(&mut self) -> Option<&mut BooleanProperty> {
+        match self {
+            Property::Boolean(prop) => Some(prop),
+            _ => None,
+        }
     }
-
-    pub fn required(mut self) -> Self {
-        self.required = true;
-        self
+    pub fn as_array_mut(&mut self) -> Option<&mut ArrayProperty> {
+        match self {
+            Property::Array(prop) => Some(prop),
+            _ => None,
+        }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct InputSchema {
-    #[serde(rename = "type")]
-    value_type: ValueType,
-    properties: HashMap<String, Property>,
-    required: Vec<String>,
-}
-
-impl Default for InputSchema {
-    fn default() -> Self {
-        InputSchema {
-            value_type: ValueType::Object,
-            properties: HashMap::new(),
-            required: Vec::new(),
+    pub fn as_object_mut(&mut self) -> Option<&mut ObjectProperty> {
+        match self {
+            Property::Object(prop) => Some(prop),
+            _ => None,
+        }
+    }
+    pub fn validate_input(&self, input: &serde_json::Value) -> Result<(), ValidationError> {
+        match self {
+            Property::String(StringProperty { enumerate, .. }) => {
+                if let Some(value) = input.as_str() {
+                    if let Some(enum_values) = enumerate {
+                        if !enum_values.contains(&value.to_string()) {
+                            return Err(ValidationError::InvalidEnum(value.to_string()));
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(ValidationError::InvalidValue(input.clone()))
+                }
+            }
+            Property::Number(_) => {
+                if input.is_number() {
+                    Ok(())
+                } else {
+                    Err(ValidationError::InvalidValue(input.clone()))
+                }
+            }
+            Property::Boolean(_) => {
+                if input.is_boolean() {
+                    Ok(())
+                } else {
+                    Err(ValidationError::InvalidValue(input.clone()))
+                }
+            }
+            Property::Array(ArrayProperty { items, .. }) => {
+                if let Some(array) = input.as_array() {
+                    for (index, item) in array.iter().enumerate() {
+                        if let Some(property) = items.get(index) {
+                            property.validate_input(item)?;
+                        } else {
+                            return Err(ValidationError::InvalidValue(item.clone()));
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(ValidationError::InvalidValue(input.clone()))
+                }
+            }
+            Property::Object(ObjectProperty {
+                properties,
+                required,
+                ..
+            }) => {
+                if let Some(object) = input.as_object() {
+                    for (name, value) in object {
+                        if let Some(property) = properties.get(name) {
+                            property.validate_input(value)?;
+                        } else {
+                            return Err(ValidationError::InvalidValue(value.clone()));
+                        }
+                    }
+                    for field in required {
+                        if !object.contains_key(field) {
+                            return Err(ValidationError::MissingField(field.clone()));
+                        }
+                    }
+                    Ok(())
+                } else {
+                    Err(ValidationError::InvalidValue(input.clone()))
+                }
+            }
         }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Missing properties: {0:?}")]
-    MissingProperties(Vec<String>),
+    #[error("Missing required field: {0}")]
+    MissingField(String),
+    #[error("Invalid enum value: {0}")]
+    InvalidEnum(String),
     #[error("Invalid property types: {0:?}")]
-    InvalidPropertyTypes(Vec<(String, String)>),
+    InvalidValue(serde_json::Value),
 }
 
 #[derive(Debug)]
 pub struct ToolBuilder {
     name: String,
     description: Option<String>,
-    input_schema: InputSchema,
+    input_schema: Property,
     handler: Option<Arc<dyn ToolHandlerFn>>,
 }
 
@@ -126,8 +328,6 @@ pub struct ToolBuilder {
 pub enum BuildToolError {
     #[error("Tool handler is missing")]
     MissingHandler,
-    #[error("Tool name is invalid: {0}")]
-    InvalidName(String),
 }
 
 impl ToolBuilder {
@@ -135,7 +335,7 @@ impl ToolBuilder {
         ToolBuilder {
             name: name.to_string(),
             description: None,
-            input_schema: InputSchema::default(),
+            input_schema: Property::object(),
             handler: None,
         }
     }
@@ -145,16 +345,33 @@ impl ToolBuilder {
         self
     }
 
-    pub fn add_property(mut self, property: Property) -> Self {
-        if property.required {
-            self.input_schema.required.push(property.name.clone());
-        }
-
-        self.input_schema
-            .properties
-            .insert(property.name.clone(), property);
-
+    pub fn schema(mut self, property: Property) -> Self {
+        self.input_schema = property;
         self
+    }
+
+    pub fn add_required_property(
+        mut self,
+        name: &str,
+        property: Property,
+    ) -> Result<Self, PropertyNameError> {
+        self.input_schema
+            .as_object_mut()
+            .unwrap()
+            .insert_property(name, true, property)?;
+        Ok(self)
+    }
+
+    pub fn add_optional_property(
+        mut self,
+        name: &str,
+        property: Property,
+    ) -> Result<Self, PropertyNameError> {
+        self.input_schema
+            .as_object_mut()
+            .unwrap()
+            .insert_property(name, false, property)?;
+        Ok(self)
     }
 
     pub fn handler<H, T>(mut self, handler: H) -> Self
@@ -172,13 +389,6 @@ impl ToolBuilder {
 
     pub fn build(self) -> Result<Tool, BuildToolError> {
         let handler = self.handler.ok_or(BuildToolError::MissingHandler)?;
-        let name_regex = NAME_REGEX
-            .get_or_init(|| Regex::new(NAME_REGEX_PATTERN).unwrap())
-            .clone();
-
-        if !name_regex.is_match(&self.name) {
-            return Err(BuildToolError::InvalidName(self.name.to_owned()));
-        }
 
         Ok(Tool {
             name: self.name,
@@ -194,7 +404,7 @@ pub struct Tool {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    input_schema: InputSchema,
+    input_schema: Property,
     #[serde(skip)]
     handler: Arc<dyn ToolHandlerFn>,
 }
@@ -208,62 +418,6 @@ impl PartialEq for Tool {
 impl Eq for Tool {}
 
 impl Tool {
-    pub fn validate_input(&self, input: &serde_json::Value) -> Result<(), ValidationError> {
-        if let Some(input_obj) = input.as_object() {
-            let mut missing_props = Vec::new();
-            let mut invalid_types = Vec::new();
-
-            for (name, property) in &self.input_schema.properties {
-                if property.required && !input_obj.contains_key(name) {
-                    missing_props.push(name.to_string());
-                }
-                if let Some(value) = input_obj.get(name) {
-                    match property.value_type {
-                        ValueType::String => {
-                            if !value.is_string() {
-                                invalid_types.push((name.to_string(), "string".to_string()));
-                            }
-                        }
-                        ValueType::Number => {
-                            if !value.is_number() {
-                                invalid_types.push((name.to_string(), "number".to_string()));
-                            }
-                        }
-                        ValueType::Boolean => {
-                            if !value.is_boolean() {
-                                invalid_types.push((name.to_string(), "boolean".to_string()));
-                            }
-                        }
-                        ValueType::Array => {
-                            if !value.is_array() {
-                                invalid_types.push((name.to_string(), "array".to_string()));
-                            }
-                        }
-                        ValueType::Object => {
-                            if !value.is_object() {
-                                invalid_types.push((name.to_string(), "object".to_string()));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !missing_props.is_empty() {
-                return Err(ValidationError::MissingProperties(missing_props));
-            }
-            if !invalid_types.is_empty() {
-                return Err(ValidationError::InvalidPropertyTypes(invalid_types));
-            }
-
-            Ok(())
-        } else {
-            Err(ValidationError::InvalidPropertyTypes(vec![(
-                "input".to_string(),
-                "object".to_string(),
-            )]))
-        }
-    }
-
     pub async fn call<T: ToString>(
         &self,
         id: T,
@@ -283,23 +437,21 @@ pub struct ToolsContext {
 }
 
 impl ToolsContext {
-    pub fn add_resource<T: Any + Send + Sync>(&mut self, resource: T) {
+    pub fn push_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
         self.resources.insert(TypeId::of::<T>(), Arc::new(resource));
     }
-
-    pub fn with_resource<T: Any + Send + Sync>(mut self, resource: T) -> Self {
-        self.add_resource(resource);
+    pub fn add_resource<T: Any + Send + Sync + Clone>(mut self, resource: T) -> Self {
+        self.push_resource(resource);
         self
     }
 
-    pub fn get_resource<T: Any + Send + Sync>(&self) -> Option<&T> {
-        self.resources
-            .get(&TypeId::of::<T>())
-            .and_then(|resource| resource.downcast_ref())
+    pub fn get_resource<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
+        let boxed_resource = self.resources.get(&TypeId::of::<T>())?;
+        Some(boxed_resource.downcast_ref::<T>().unwrap().clone())
     }
 }
 
-pub trait FromContext: Send + Sync + 'static {
+pub trait FromContext: Send + 'static {
     fn from_context(context: &ToolsContext) -> Self;
 }
 
@@ -336,21 +488,34 @@ impl Tools {
         Tools::default()
     }
 
-    pub fn add_tool(mut self, tool: Tool) -> Self {
-        self.tools.insert(tool.name.clone(), tool);
-        self
-    }
-
     pub fn push_tool(&mut self, tool: Tool) {
         self.tools.insert(tool.name.clone(), tool);
     }
 
-    pub fn get(&self, tool_name: &str) -> Option<&Tool> {
+    pub fn add_tool(mut self, tool: Tool) -> Self {
+        self.push_tool(tool);
+        self
+    }
+
+    pub fn get_tool(&self, tool_name: &str) -> Option<&Tool> {
         self.tools.get(tool_name)
     }
 
-    pub async fn call(&self, tool_use: ToolUse) -> Option<ToolResult> {
-        if let Some(tool) = self.get(&tool_use.name) {
+    pub fn push_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
+        self.context.push_resource(resource);
+    }
+
+    pub fn add_resource<T: Any + Send + Sync + Clone>(mut self, resource: T) -> Self {
+        self.push_resource(resource);
+        self
+    }
+
+    pub fn get_resource<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
+        self.context.get_resource()
+    }
+
+    pub async fn use_tool(&self, tool_use: ToolUse) -> Option<ToolResult> {
+        if let Some(tool) = self.get_tool(&tool_use.name) {
             Some(
                 tool.call(tool_use.id.clone(), tool_use.input, &self.context)
                     .await,
@@ -516,166 +681,155 @@ mod tests {
     }
 
     #[test]
-    fn test_property_new() {
-        let property = Property::new("name");
-        assert_eq!(property.name, "name");
-        assert_eq!(property.value_type, ValueType::String);
-        assert_eq!(property.description, None);
-        assert!(!property.required);
+    fn test_string_property_default() {
+        let prop = StringProperty::default();
+        assert_eq!(prop.description, None);
+        assert_eq!(prop.enumerate, None);
     }
 
     #[test]
-    fn test_property_value_type() {
-        let property = Property::new("age").value_type(ValueType::Number);
-        assert_eq!(property.value_type, ValueType::Number);
+    fn test_string_property_description() {
+        let prop = StringProperty::default().description("A string property");
+        assert_eq!(prop.description, Some("A string property".to_string()));
+        assert_eq!(prop.enumerate, None);
     }
 
     #[test]
-    fn test_property_description() {
-        let property = Property::new("email").description("User email address");
-        assert_eq!(property.description, Some("User email address".to_string()));
+    fn test_string_property_description_string() {
+        let desc = "Another description".to_string();
+        let prop = StringProperty::default().description(desc.clone());
+        assert_eq!(prop.description, Some(desc));
     }
 
     #[test]
-    fn test_property_required() {
-        let property = Property::new("username").required();
-        assert!(property.required);
+    fn test_string_property_enumerate() {
+        let values = vec!["one".to_string(), "two".to_string()];
+        let prop = StringProperty::default().enumerate(values.clone());
+        assert_eq!(prop.description, None);
+        assert_eq!(prop.enumerate, Some(values));
     }
 
     #[test]
-    fn test_property_builder_pattern() {
-        let property = Property::new("admin")
-            .boolean_type()
-            .description("Admin user flag")
-            .required();
-
-        assert_eq!(property.name, "admin");
-        assert_eq!(property.value_type, ValueType::Boolean);
-        assert_eq!(property.description, Some("Admin user flag".to_string()));
-        assert!(property.required);
+    fn test_string_property_enumerate_vec() {
+        let values = vec!["a", "b", "c"];
+        let prop = StringProperty::default().enumerate(values.clone());
+        assert_eq!(
+            prop.enumerate,
+            Some(values.iter().map(|&s| s.to_string()).collect())
+        );
     }
 
     #[test]
-    fn test_tool_builder_new() {
-        let tool = ToolBuilder::new("user_create");
-        assert_eq!(tool.name, "user_create");
-        assert_eq!(tool.description, None);
-        assert_eq!(tool.input_schema.value_type, ValueType::Object);
-        assert!(tool.input_schema.properties.is_empty());
+    fn test_string_property_chained_builder() {
+        let prop = StringProperty::default()
+            .description("A string property")
+            .enumerate(vec!["one", "two"]);
+
+        assert_eq!(prop.description, Some("A string property".to_string()));
+        assert_eq!(
+            prop.enumerate,
+            Some(vec!["one".to_string(), "two".to_string()])
+        );
     }
 
     #[test]
-    fn test_tool_builder_description() {
-        let tool = ToolBuilder::new("user_update").description("Update user profile");
-        assert_eq!(tool.description, Some("Update user profile".to_string()));
+    fn test_number_property_default() {
+        let prop = NumberProperty::default();
+        assert_eq!(prop.description, None);
     }
 
     #[test]
-    fn test_tool_builder_add_property() {
-        let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
-            .add_property(Property::new("age").number_type());
-
-        assert_eq!(tool.input_schema.properties.len(), 3);
-
-        let name_prop = tool.input_schema.properties.get("name").unwrap();
-        assert!(name_prop.required);
-
-        let email_prop = tool.input_schema.properties.get("email").unwrap();
-        assert_eq!(email_prop.value_type, ValueType::String);
-
-        let age_prop = tool.input_schema.properties.get("age").unwrap();
-        assert_eq!(age_prop.value_type, ValueType::Number);
+    fn test_number_property_description() {
+        let prop = NumberProperty::default().description("A number property");
+        assert_eq!(prop.description, Some("A number property".to_string()));
     }
 
     #[test]
-    fn test_validate_input_valid() {
-        let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
-            .add_property(Property::new("age").number_type())
-            .handler(empty_handler)
-            .build()
-            .unwrap();
-
-        let input = serde_json::json!({
-            "name": "John Doe",
-            "email": "john@example.com",
-            "age": 30
-        });
-
-        assert!(tool.validate_input(&input).is_ok());
+    fn test_number_property_description_string() {
+        let desc = "Another number description".to_string();
+        let prop = NumberProperty::default().description(desc.clone());
+        assert_eq!(prop.description, Some(desc));
     }
 
     #[test]
-    fn test_validate_input_missing_required() {
-        let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type().required())
-            .add_property(Property::new("age").number_type())
-            .handler(empty_handler)
-            .build()
-            .unwrap();
-        let input = serde_json::json!({
-            "age": 30
-        });
-        match tool.validate_input(&input) {
-            Err(ValidationError::MissingProperties(props)) => {
-                assert_eq!(props.len(), 2);
-                assert!(props.contains(&"name".to_string()));
-                assert!(props.contains(&"email".to_string()));
-            }
-            _ => panic!("Expected MissingProperties error"),
-        }
+    fn test_boolean_property_default() {
+        let prop = BooleanProperty::default();
+        assert_eq!(prop.description, None);
     }
 
     #[test]
-    fn test_validate_input_invalid_type() {
-        let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
-            .add_property(Property::new("age").number_type())
-            .handler(empty_handler)
-            .build()
-            .unwrap();
-        let input = serde_json::json!({
-            "name": "John Doe",
-            "email": 123,
-            "age": "30"
-        });
-        match tool.validate_input(&input) {
-            Err(ValidationError::InvalidPropertyTypes(props)) => {
-                assert_eq!(props.len(), 2);
-                assert!(props.contains(&("email".to_string(), "string".to_string())));
-                assert!(props.contains(&("age".to_string(), "number".to_string())));
-            }
-            _ => panic!("Expected InvalidPropertyTypes error"),
-        }
+    fn test_boolean_property_description() {
+        let prop = BooleanProperty::default().description("A boolean property");
+        assert_eq!(prop.description, Some("A boolean property".to_string()));
     }
 
     #[test]
-    fn test_validate_input_not_object() {
-        let tool = ToolBuilder::new("user_create")
-            .handler(empty_handler)
-            .build()
-            .unwrap();
-        let input = serde_json::json!("invalid");
-        match tool.validate_input(&input) {
-            Err(ValidationError::InvalidPropertyTypes(props)) => {
-                assert_eq!(props.len(), 1);
-                assert_eq!(props[0], ("input".to_string(), "object".to_string()));
-            }
-            _ => panic!("Expected InvalidPropertyTypes error"),
-        }
+    fn test_boolean_property_description_string() {
+        let desc = "Another boolean description".to_string();
+        let prop = BooleanProperty::default().description(desc.clone());
+        assert_eq!(prop.description, Some(desc));
+    }
+
+    fn test_array_property_default() {
+        let prop = ArrayProperty::default();
+        assert_eq!(prop.description, None);
+        assert_eq!(prop.items, Vec::new());
+    }
+
+    #[test]
+    fn test_array_property_description() {
+        let prop = ArrayProperty::default().description("An array property");
+        assert_eq!(prop.description, Some("An array property".to_string()));
+        assert_eq!(prop.items, Vec::new());
+    }
+
+    #[test]
+    fn test_array_property_description_string() {
+        let desc = "Another array description".to_string();
+        let prop = ArrayProperty::default().description(desc.clone());
+        assert_eq!(prop.description, Some(desc));
+    }
+
+    #[test]
+    fn test_array_property_items() {
+        let items = vec![
+            Box::new(Property::String(StringProperty::default())),
+            Box::new(Property::Number(NumberProperty::default())),
+        ];
+        let prop = ArrayProperty::default().items(items.clone());
+        assert_eq!(prop.description, None);
+        assert_eq!(prop.items, items);
+    }
+
+    #[test]
+    fn test_array_property_push_item() {
+        let item1 = Box::new(Property::String(StringProperty::default()));
+        let item2 = Box::new(Property::Number(NumberProperty::default()));
+        let prop = ArrayProperty::default()
+            .push_item(item1.clone())
+            .push_item(item2.clone());
+        assert_eq!(prop.items, vec![item1, item2]);
+    }
+
+    #[test]
+    fn test_array_property_chained_builder() {
+        let item = Box::new(Property::Boolean(BooleanProperty::default()));
+        let prop = ArrayProperty::default()
+            .description("An array property")
+            .push_item(item.clone());
+        assert_eq!(prop.description, Some("An array property".to_string()));
+        assert_eq!(prop.items, vec![item]);
     }
 
     #[tokio::test]
     async fn test_tool_empty_handler() {
         let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
-            .add_property(Property::new("age").number_type())
+            .add_required_property("name", Property::string())
+            .unwrap()
+            .add_required_property("email", Property::string())
+            .unwrap()
+            .add_required_property("age", Property::number())
+            .unwrap()
             .handler(empty_handler)
             .build()
             .unwrap();
@@ -704,9 +858,12 @@ mod tests {
         }
 
         let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
-            .add_property(Property::new("age").number_type())
+            .add_required_property("name", Property::string())
+            .unwrap()
+            .add_required_property("email", Property::string())
+            .unwrap()
+            .add_required_property("age", Property::number())
+            .unwrap()
             .handler(handler)
             .build()
             .unwrap();
@@ -728,10 +885,10 @@ mod tests {
     fn test_add_and_get_resource_primitive_type() {
         let mut context = ToolsContext::default();
         let value: i32 = 42;
-        context.add_resource(value);
+        context.push_resource(value);
 
         let retrieved_value = context.get_resource::<i32>().unwrap();
-        assert_eq!(*retrieved_value, value);
+        assert_eq!(retrieved_value, value);
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -747,10 +904,10 @@ mod tests {
             field1: "test".to_string(),
             field2: 42,
         };
-        context.add_resource(test_struct.clone());
+        context.push_resource(test_struct.clone());
 
         let retrieved_struct = context.get_resource::<TestStruct>().unwrap();
-        assert_eq!(*retrieved_struct, test_struct);
+        assert_eq!(retrieved_struct, test_struct);
     }
 
     #[test]
@@ -767,7 +924,7 @@ mod tests {
     impl FromContext for TestFromContext {
         fn from_context(context: &ToolsContext) -> Self {
             let value = context.get_resource::<i32>().unwrap();
-            TestFromContext { value: *value }
+            TestFromContext { value: value }
         }
     }
 
@@ -775,7 +932,7 @@ mod tests {
     fn test_from_context_trait() {
         let mut context = ToolsContext::default();
         let value: i32 = 42;
-        context.add_resource(value);
+        context.push_resource(value);
 
         let test_from_context = TestFromContext::from_context(&context);
         assert_eq!(test_from_context.value, value);
@@ -793,14 +950,17 @@ mod tests {
         }
 
         let tool = ToolBuilder::new("user_create")
-            .add_property(Property::new("name").required())
-            .add_property(Property::new("email").string_type())
-            .add_property(Property::new("age").number_type())
+            .add_required_property("name", Property::string())
+            .unwrap()
+            .add_required_property("email", Property::string())
+            .unwrap()
+            .add_required_property("age", Property::number())
+            .unwrap()
             .handler(handler)
             .build()
             .unwrap();
 
-        let context = ToolsContext::default().with_resource(1000_i32);
+        let context = ToolsContext::default().add_resource(1000_i32);
 
         let input = serde_json::json!({
             "name": "John Doe",

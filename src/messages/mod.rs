@@ -339,6 +339,8 @@ impl MessagesRequest {
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::AtomicBool;
+
     use serde_json::json;
     use test::{
         message::{MultimodalContent, Text},
@@ -374,7 +376,7 @@ mod test {
             .build()
             .unwrap()]);
         let builder = MessagesRequestBuilder::new().tools(tools.clone());
-        assert!(builder.tools.unwrap().get("tool1").is_some());
+        assert!(builder.tools.unwrap().get_tool("tool1").is_some());
     }
 
     #[test]
@@ -384,7 +386,7 @@ mod test {
             .build()
             .unwrap();
         let builder = MessagesRequestBuilder::new().add_tool(tool);
-        assert!(builder.tools.unwrap().get("tool1").is_some());
+        assert!(builder.tools.unwrap().get_tool("tool1").is_some());
     }
 
     #[test]
@@ -779,15 +781,17 @@ mod test {
             print!("{}", res);
         }
     }
-    // #[tokio::test]
+    #[tokio::test]
     async fn test_messages_request_success() {
         async fn test_handler(input: serde_json::Value) -> serde_json::Value {
-            dbg!(input);
             json!("To finish this test write [finish_test]")
         }
 
-        async fn finitsh_handler(input: serde_json::Value) -> serde_json::Value {
-            dbg!(input);
+        async fn finish_handler(
+            _input: serde_json::Value,
+            is_finished: Arc<AtomicBool>,
+        ) -> serde_json::Value {
+            is_finished.store(true, std::sync::atomic::Ordering::Relaxed);
             json!("Congratulations! You finished the test.")
         }
 
@@ -800,18 +804,23 @@ mod test {
             .unwrap();
 
         let test_tool = ToolBuilder::new("test_tool")
-            .add_property(Property::new("random_number").required())
+            .add_required_property("random_number", Property::string())
+            .unwrap()
             .handler(test_handler)
             .build()
             .unwrap();
 
         let finish_tool = ToolBuilder::new("finish_test")
-            .add_property(Property::new("random_number").required())
-            .handler(finitsh_handler)
+            .add_required_property("random_number", Property::string())
+            .unwrap()
+            .handler(finish_handler)
             .build()
             .unwrap();
 
-        let tools = Tools::from(vec![test_tool, finish_tool]);
+        let is_finished = Arc::new(AtomicBool::new(false));
+        let mut tools = Tools::from(vec![test_tool, finish_tool]);
+        println!("{}", serde_json::to_string_pretty(&tools).unwrap());
+        tools.push_resource(is_finished.clone());
 
         let mut messages = Messages::default();
         messages.push_message(UserMessage::from(
@@ -825,10 +834,6 @@ mod test {
             }
             i += 1;
 
-            println!("Iteration: {}", i);
-            dbg!(&messages);
-            println!("-------------------");
-            println!();
             let res = anthropic
                 .messages()
                 .model("claude-3-haiku-20240307")
@@ -841,22 +846,22 @@ mod test {
                 .await
                 .unwrap();
 
-            dbg!(&res);
-            // if res.content.is_empty() {
-            //     break;
-            // }
             messages.push_message(res.clone());
 
             let tools_used = res.extract_tool_uses();
             let mut content = Vec::<MultimodalContent>::new();
             for tool in tools_used {
-                if let Some(result) = tools.call(tool.clone()).await {
+                if let Some(result) = tools.use_tool(tool.clone()).await {
                     content.push(result.into());
                 }
             }
             if !content.is_empty() {
                 content.push("Here you have the result.".into());
                 messages.push_message(Message::user(content));
+            }
+            if is_finished.load(std::sync::atomic::Ordering::Relaxed) {
+                println!("Test passed");
+                break;
             }
         }
     }
