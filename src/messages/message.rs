@@ -1,21 +1,77 @@
-use std::{collections::HashMap, fmt, str::FromStr};
+use std::{fmt, path::Path};
 
+use base64::Engine;
 use derivative::Derivative;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use super::tools::{ExtractToolUse, ToolResult, ToolUse};
+use super::tools::{ToolResult, ToolUse};
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+use strum::{Display, EnumString};
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum ImageSource {
+    Base64 { media_type: String, data: String },
+}
+
+impl ImageSource {
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, std::io::Error> {
+        let path = path.as_ref();
+        let data = std::fs::read(path)?;
+        let base64_data = base64::engine::general_purpose::STANDARD.encode(data);
+        let media_type = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+
+        Ok(ImageSource::Base64 {
+            media_type,
+            data: base64_data,
+        })
+    }
+}
+
+impl fmt::Display for ImageSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImageSource::Base64 { media_type, data } => {
+                let truncated_data = if data.len() > 20 {
+                    format!("{}...", &data[..20])
+                } else {
+                    data.clone()
+                };
+                write!(f, "Base64 ({}, {})", media_type, truncated_data)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Image {
     pub source: ImageSource,
+}
+
+impl Image {
+    pub fn new(source: ImageSource) -> Self {
+        Self { source }
+    }
+
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, std::io::Error> {
+        let source = ImageSource::from_path(path)?;
+        Ok(Self::new(source))
+    }
+
+    pub fn from_base64(media_type: String, data: String) -> Self {
+        let source = ImageSource::Base64 { media_type, data };
+        Self::new(source)
+    }
 }
 
 impl fmt::Display for Image {
@@ -29,6 +85,40 @@ pub struct Text {
     pub text: String,
 }
 
+impl Text {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    pub fn push_str(&mut self, string: &str) {
+        self.text.push_str(string);
+    }
+
+    pub fn to_lowercase(&self) -> Self {
+        Self {
+            text: self.text.to_lowercase(),
+        }
+    }
+
+    pub fn to_uppercase(&self) -> Self {
+        Self {
+            text: self.text.to_uppercase(),
+        }
+    }
+}
+
 impl From<String> for Text {
     fn from(text: String) -> Self {
         Text { text }
@@ -38,8 +128,36 @@ impl From<String> for Text {
 impl From<&str> for Text {
     fn from(text: &str) -> Self {
         Text {
-            text: text.to_string(),
+            text: text.to_owned(),
         }
+    }
+}
+
+impl From<&String> for Text {
+    fn from(text: &String) -> Self {
+        Text { text: text.clone() }
+    }
+}
+
+impl From<Box<str>> for Text {
+    fn from(text: Box<str>) -> Self {
+        Text {
+            text: text.into_string(),
+        }
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for Text {
+    fn from(text: std::borrow::Cow<'_, str>) -> Self {
+        Text {
+            text: text.into_owned(),
+        }
+    }
+}
+
+impl From<Text> for String {
+    fn from(text: Text) -> Self {
+        text.text
     }
 }
 
@@ -70,6 +188,30 @@ impl From<&str> for MultimodalContent {
     }
 }
 
+impl From<&String> for MultimodalContent {
+    fn from(text: &String) -> Self {
+        MultimodalContent::Text(text.into())
+    }
+}
+
+impl From<Box<str>> for MultimodalContent {
+    fn from(text: Box<str>) -> Self {
+        MultimodalContent::Text(text.into())
+    }
+}
+
+impl From<std::borrow::Cow<'_, str>> for MultimodalContent {
+    fn from(text: std::borrow::Cow<'_, str>) -> Self {
+        MultimodalContent::Text(text.into())
+    }
+}
+
+impl From<Text> for MultimodalContent {
+    fn from(text: Text) -> Self {
+        MultimodalContent::Text(text)
+    }
+}
+
 impl From<Image> for MultimodalContent {
     fn from(image: Image) -> Self {
         MultimodalContent::Image(image)
@@ -91,35 +233,10 @@ impl From<ToolResult> for MultimodalContent {
 impl fmt::Display for MultimodalContent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MultimodalContent::Text(text) => write!(f, "{}", text),
-            MultimodalContent::Image(image) => write!(f, "{}", image),
-            MultimodalContent::ToolUse(tool_use) => write!(f, "{}", tool_use),
-            MultimodalContent::ToolResult(tool_result) => write!(f, "{}", tool_result),
-        }
-    }
-}
-
-impl ExtractToolUse for MultimodalContent {
-    fn extract_tool_uses(&self) -> Vec<&ToolUse> {
-        match self {
-            MultimodalContent::ToolUse(tool_use) => vec![tool_use],
-            _ => Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(tag = "type")]
-pub enum ImageSource {
-    Base64 { media_type: String, data: String },
-}
-
-impl fmt::Display for ImageSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ImageSource::Base64 { media_type, data } => {
-                write!(f, "base64 ({}, {})", media_type, data)
-            }
+            Self::Text(text) => fmt::Display::fmt(text, f),
+            Self::Image(image) => fmt::Display::fmt(image, f),
+            Self::ToolUse(tool_use) => fmt::Display::fmt(tool_use, f),
+            Self::ToolResult(tool_result) => fmt::Display::fmt(tool_result, f),
         }
     }
 }
@@ -140,25 +257,58 @@ impl UserMessage {
             name: None,
         }
     }
+
+    pub fn add_content<T: Into<MultimodalContent>>(&mut self, content: T) {
+        self.content.push(content.into());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.content.len()
+    }
+}
+
+impl fmt::Display for UserMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "User")?;
+        if let Some(name) = &self.name {
+            write!(f, " ({})", name)?;
+        }
+        write!(f, ": ")?;
+        for (i, content) in self.content.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", content)?;
+        }
+        Ok(())
+    }
 }
 
 impl<T: Into<MultimodalContent>> From<T> for UserMessage {
-    fn from(value: T) -> Self {
-        UserMessage {
-            role: Role::User,
-            content: vec![value.into()],
-            name: None,
-        }
+    fn from(content: T) -> Self {
+        Self::new(vec![content])
     }
 }
 
 impl From<Vec<MultimodalContent>> for UserMessage {
-    fn from(value: Vec<MultimodalContent>) -> Self {
-        UserMessage {
-            role: Role::User,
-            content: value,
-            name: None,
-        }
+    fn from(content: Vec<MultimodalContent>) -> Self {
+        Self::new(content)
+    }
+}
+
+impl From<UserMessage> for Vec<MultimodalContent> {
+    fn from(message: UserMessage) -> Self {
+        message.content
+    }
+}
+
+impl<T: Into<MultimodalContent>> Extend<T> for UserMessage {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.content.extend(iter.into_iter().map(Into::into));
     }
 }
 
@@ -179,25 +329,78 @@ impl AssistantMessage {
             name: None,
         }
     }
+
+    pub fn add_content<T: Into<MultimodalContent>>(&mut self, content: T) {
+        self.content.push(content.into());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.content.len()
+    }
+
+    pub fn tool_uses(&self) -> impl Iterator<Item = &ToolUse> {
+        self.content.iter().filter_map(|content| {
+            if let MultimodalContent::ToolUse(tool_use) = content {
+                Some(tool_use)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn tool_uses_mut(&mut self) -> impl Iterator<Item = &mut ToolUse> {
+        self.content.iter_mut().filter_map(|content| {
+            if let MultimodalContent::ToolUse(tool_use) = content {
+                Some(tool_use)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl fmt::Display for AssistantMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Assistant")?;
+        if let Some(name) = &self.name {
+            write!(f, " ({})", name)?;
+        }
+        write!(f, ": ")?;
+        for (i, content) in self.content.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", content)?;
+        }
+        Ok(())
+    }
 }
 
 impl<T: Into<MultimodalContent>> From<T> for AssistantMessage {
-    fn from(value: T) -> Self {
-        AssistantMessage {
-            role: Role::Assistant,
-            content: vec![value.into()],
-            name: None,
-        }
+    fn from(content: T) -> Self {
+        Self::new(vec![content])
     }
 }
 
 impl From<Vec<MultimodalContent>> for AssistantMessage {
-    fn from(value: Vec<MultimodalContent>) -> Self {
-        AssistantMessage {
-            role: Role::Assistant,
-            content: value,
-            name: None,
-        }
+    fn from(content: Vec<MultimodalContent>) -> Self {
+        Self::new(content)
+    }
+}
+
+impl From<AssistantMessage> for Vec<MultimodalContent> {
+    fn from(message: AssistantMessage) -> Self {
+        message.content
+    }
+}
+
+impl<T: Into<MultimodalContent>> Extend<T> for AssistantMessage {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.content.extend(iter.into_iter().map(Into::into));
     }
 }
 
@@ -213,19 +416,53 @@ impl Message {
     pub fn user<T: Into<MultimodalContent>>(content: Vec<T>) -> Self {
         Message::User(UserMessage::new(content))
     }
+
     pub fn assistant<T: Into<MultimodalContent>>(content: Vec<T>) -> Self {
         Message::Assistant(AssistantMessage::new(content))
     }
-    pub fn content(&self) -> &Vec<MultimodalContent> {
+
+    pub fn content(&self) -> &[MultimodalContent] {
         match self {
             Message::User(msg) => &msg.content,
             Message::Assistant(msg) => &msg.content,
         }
     }
-    pub fn push_content<T: Into<MultimodalContent>>(&mut self, content: T) {
+
+    pub fn add_content<T: Into<MultimodalContent>>(&mut self, content: T) {
         match self {
             Message::User(msg) => msg.content.push(content.into()),
             Message::Assistant(msg) => msg.content.push(content.into()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content().is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.content().len()
+    }
+
+    pub fn role(&self) -> Role {
+        match self {
+            Message::User(_) => Role::User,
+            Message::Assistant(_) => Role::Assistant,
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Message::User(msg) => msg.name.as_deref(),
+            Message::Assistant(msg) => msg.name.as_deref(),
+        }
+    }
+}
+
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Message::User(msg) => write!(f, "User: {}", msg),
+            Message::Assistant(msg) => write!(f, "Assistant: {}", msg),
         }
     }
 }
@@ -242,15 +479,58 @@ impl From<AssistantMessage> for Message {
     }
 }
 
+impl<T: Into<MultimodalContent>> From<T> for Message {
+    fn from(content: T) -> Self {
+        Message::User(UserMessage::from(content))
+    }
+}
+
+impl From<Vec<MultimodalContent>> for Message {
+    fn from(content: Vec<MultimodalContent>) -> Self {
+        Message::User(UserMessage::from(content))
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Messages(pub Vec<Message>);
 
 impl Messages {
-    pub fn push_message(&mut self, message: impl Into<Message>) {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    pub fn add_message(&mut self, message: impl Into<Message>) {
         self.0.push(message.into());
     }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Message> {
+        self.0.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Message> {
+        self.0.iter_mut()
+    }
+
+    pub fn last(&self) -> Option<&Message> {
+        self.0.last()
+    }
+
+    pub fn last_mut(&mut self) -> Option<&mut Message> {
+        self.0.last_mut()
     }
 }
 
@@ -266,15 +546,18 @@ impl From<Vec<Message>> for Messages {
     }
 }
 
-impl From<UserMessage> for Messages {
-    fn from(value: UserMessage) -> Self {
-        Messages(vec![Message::User(value)])
-    }
-}
-
 impl From<AssistantMessage> for Messages {
     fn from(value: AssistantMessage) -> Self {
         Messages(vec![Message::Assistant(value)])
+    }
+}
+
+impl<T> From<T> for Messages
+where
+    T: Into<UserMessage>,
+{
+    fn from(value: T) -> Self {
+        Messages(vec![Message::User(value.into())])
     }
 }
 
@@ -297,6 +580,12 @@ impl std::ops::Index<usize> for Messages {
     }
 }
 
+impl std::ops::IndexMut<usize> for Messages {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.0[index]
+    }
+}
+
 impl IntoIterator for Messages {
     type Item = Message;
     type IntoIter = std::vec::IntoIter<Self::Item>;
@@ -305,95 +594,25 @@ impl IntoIterator for Messages {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
-pub struct MessageBuilder {
-    variables: HashMap<String, String>,
-    content: Option<String>,
-    role: Option<Role>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MessageBuilderError {
-    #[error("Missing content")]
-    MissingContent,
-    #[error("Missing role")]
-    MissingRole,
-    #[error("Variable {0} not found")]
-    VariableNotFound(String),
-}
-
-impl MessageBuilder {
-    pub fn variable<T: ToString>(mut self, name: T, value: T) -> Self {
-        self.variables.insert(name.to_string(), value.to_string());
-        self
-    }
-    pub fn content<T: ToString>(mut self, content: T) -> Self {
-        self.content = Some(content.to_string());
-        self
-    }
-    pub fn role(mut self, role: Role) -> Self {
-        self.role = Some(role);
-        self
-    }
-    pub fn build(self) -> Result<Message, MessageBuilderError> {
-        let content = self.content.ok_or(MessageBuilderError::MissingContent)?;
-        let role = self.role.ok_or(MessageBuilderError::MissingRole)?;
-        let replaced_content = content.replace_variables(&self.variables)?;
-        match role {
-            Role::User => Ok(Message::user(vec![replaced_content])),
-            Role::Assistant => Ok(Message::assistant(vec![replaced_content])),
-        }
+impl<'a> IntoIterator for &'a Messages {
+    type Item = &'a Message;
+    type IntoIter = std::slice::Iter<'a, Message>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Variable {0} not found")]
-pub struct ReplaceVariableError(String);
-
-impl From<ReplaceVariableError> for MessageBuilderError {
-    fn from(value: ReplaceVariableError) -> Self {
-        MessageBuilderError::VariableNotFound(value.0)
-    }
-}
-
-trait ReplaceVariables: Sized {
-    fn replace_variables(
-        &self,
-        variables: &HashMap<String, String>,
-    ) -> Result<Self, ReplaceVariableError>;
-}
-
-impl<T: ?Sized + ToString + From<String>> ReplaceVariables for T {
-    fn replace_variables(
-        &self,
-        variables: &HashMap<String, String>,
-    ) -> Result<Self, ReplaceVariableError> {
-        let content = self.to_string();
-        let mut result = content.clone();
-
-        let re = Regex::new(r"\{\$([A-Za-z0-9_]+)\}").unwrap();
-        let placeholders = re
-            .captures_iter(&content)
-            .map(|cap| cap[1].to_string())
-            .collect::<Vec<_>>();
-
-        for placeholder in placeholders {
-            if let Some(value) = variables.get(&placeholder) {
-                let placeholder_str = format!(r"{{${}}}", placeholder);
-                result = result.replace(&placeholder_str, value);
-            } else {
-                return Err(ReplaceVariableError(placeholder));
-            }
-        }
-
-        Ok(Self::from(result))
+impl<'a> IntoIterator for &'a mut Messages {
+    type Item = &'a mut Message;
+    type IntoIter = std::slice::IterMut<'a, Message>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_role_serialization() {
@@ -639,64 +858,6 @@ mod tests {
         let assistant_message: AssistantMessage = serde_json::from_str(json).unwrap();
         assert_eq!(assistant_message.role, Role::Assistant);
         assert_eq!(assistant_message.name, None);
-    }
-
-    #[test]
-    fn test_replace_variables_string_success() {
-        let input = "Hello, {$name}!";
-        let mut variables = HashMap::new();
-        variables.insert("name".to_string(), "Alice".to_string());
-
-        let result = input.to_string().replace_variables(&variables).unwrap();
-
-        assert_eq!(result, "Hello, Alice!");
-    }
-
-    #[test]
-    fn test_replace_variables_string_multiple_vars() {
-        let input = "{$greeting}, {$name}! You are {$age} years old.";
-        let mut variables = HashMap::new();
-        variables.insert("greeting".to_string(), "Hi".to_string());
-        variables.insert("name".to_string(), "Bob".to_string());
-        variables.insert("age".to_string(), "30".to_string());
-
-        let result = input.to_string().replace_variables(&variables).unwrap();
-
-        assert_eq!(result, "Hi, Bob! You are 30 years old.");
-    }
-
-    #[test]
-    fn test_replace_variables_string_no_vars() {
-        let input = "No variables here";
-        let variables = HashMap::new();
-
-        let result = input.to_string().replace_variables(&variables).unwrap();
-
-        assert_eq!(result, "No variables here");
-    }
-
-    #[test]
-    fn test_replace_variables_string_unused_var() {
-        let input = "Hello, {$name}!";
-        let mut variables = HashMap::new();
-        variables.insert("name".to_string(), "Alice".to_string());
-        variables.insert("unused".to_string(), "value".to_string());
-
-        let result = input.to_string().replace_variables(&variables).unwrap();
-
-        assert_eq!(result, "Hello, Alice!");
-    }
-
-    #[test]
-    fn test_replace_variables_missing_var() {
-        let input = "Hello, {$name}! You are {$age} years old.";
-        let mut variables = HashMap::new();
-        variables.insert("name".to_string(), "Alice".to_string());
-        let result = input.to_string().replace_variables(&variables);
-        match result {
-            Ok(_) => panic!("Expected an error but got Ok"),
-            Err(e) => assert_eq!(e.to_string(), "Variable age not found"),
-        }
     }
 
     #[test]

@@ -112,19 +112,38 @@ pub struct ApiErrorDetail {
 
 #[derive(Debug, Error)]
 pub enum ApiRequestError {
-    #[error(transparent)]
-    ReqwestError(#[from] reqwest::Error),
-    #[error(transparent)]
-    SerdeError(#[from] serde_json::Error),
-    #[error(transparent)]
-    EventSourceError(#[from] reqwest_eventsource::Error),
+    #[error("HTTP request error: {0}")]
+    Request(#[from] reqwest::Error),
 
-    #[error("Invalid request error: {message}")]
-    InvalidRequestError {
+    #[error("JSON serialization/deserialization error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("EventSource error: {0}")]
+    EventSource(#[from] reqwest_eventsource::Error),
+
+    #[error("Invalid request: {message}")]
+    InvalidRequest {
         message: String,
         param: Option<String>,
         code: Option<String>,
+        status: reqwest::StatusCode,
     },
-    #[error("Unexpected response from API: {response}")]
-    UnexpectedResponse { response: String },
+
+    #[error("Unexpected API response: {0}")]
+    UnexpectedResponse(String),
+
+    #[error("Rate limit exceeded")]
+    RateLimit,
+
+    #[error("Deserialization failed: {0}")]
+    Deserialization(String),
+
+    #[error("Unknown event type received: {0}")]
+    UnknownEventType(String),
+
+    #[error("Stream error: {0}")]
+    Stream(String),
+
+    #[error("Serialization failed: {0}")]
+    Serialization(String),
 }

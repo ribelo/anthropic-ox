@@ -27,3 +27,7 @@ reqwest-eventsource = "0.6"
 derivative = "2.2"
 cfg-if = "1.0.0"
 regex = "1.10.4"
+schemars = "0.8.16"
+strum = { version = "0.26.2", features = ["derive"] }
+base64 = "0.22.1"
+mime_guess = "2.0.4"
