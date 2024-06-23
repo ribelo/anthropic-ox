@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio_stream::{Stream, StreamExt};
 use tools::ToolUse;
 
-use crate::{ApiRequestError, Client, ErrorResponse, BASE_URL};
+use crate::{Anthropic, ApiRequestError, ErrorResponse, BASE_URL};
 
 use self::{
     message::{Message, Messages, MultimodalContent, Role},
@@ -38,7 +38,7 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
     #[serde(skip)]
-    pub client: Client,
+    pub client: Anthropic,
 }
 
 #[derive(Debug, Default)]
@@ -53,7 +53,7 @@ pub struct MessagesRequestBuilder {
     pub(crate) temperature: Option<f32>,
     pub(crate) top_p: Option<f32>,
     pub(crate) top_k: Option<i32>,
-    pub(crate) client: Option<Client>,
+    pub(crate) client: Option<Anthropic>,
 }
 
 #[derive(Debug, Error)]
@@ -137,7 +137,7 @@ impl MessagesRequestBuilder {
         self
     }
 
-    pub fn with_client(mut self, client: Client) -> Self {
+    pub fn with_client(mut self, client: Anthropic) -> Self {
         self.client = Some(client);
         self
     }
@@ -411,7 +411,7 @@ mod test {
     use test::message::{MultimodalContent, Text};
     use tools::{ToolContext, ToolError};
 
-    use crate::ClientBuilder;
+    use crate::AnthropicBuilder;
 
     use super::*;
 
@@ -515,7 +515,10 @@ mod test {
 
     #[test]
     fn test_messages_request_builder_client() {
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
         let builder = MessagesRequestBuilder::new().with_client(client.clone());
         assert!(builder.client.is_some());
     }
@@ -525,7 +528,10 @@ mod test {
         let messages = Messages::from("Hello");
         let model = "claude-3-sonnet-20240229";
         let max_tokens = 100;
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
 
         let request = MessagesRequestBuilder::new()
             .with_messages(messages.clone())
@@ -544,7 +550,10 @@ mod test {
     fn test_messages_request_builder_build_messages_not_set() {
         let model = "claude-3-sonnet-20240229";
         let max_tokens = 100;
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
 
         let result = MessagesRequestBuilder::new()
             .with_model(model)
@@ -562,7 +571,10 @@ mod test {
     fn test_messages_request_builder_build_model_not_set() {
         let messages = Messages::from(UserMessage::from("Hello"));
         let max_tokens = 100;
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
 
         let result = MessagesRequestBuilder::new()
             .with_messages(messages)
@@ -580,7 +592,10 @@ mod test {
     fn test_messages_request_builder_build_max_tokens_not_set() {
         let messages = Messages::from(UserMessage::from("Hello"));
         let model = "claude-3-sonnet-20240229";
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
 
         let result = MessagesRequestBuilder::new()
             .with_messages(messages)
@@ -721,7 +736,10 @@ mod test {
 
     #[test]
     fn test_messages_request_push_message() {
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
         let mut request = MessagesRequest {
             messages: Messages::default(),
             tools: Tools::new(),
@@ -743,7 +761,10 @@ mod test {
 
     #[test]
     fn test_messages_request_add_message() {
-        let client = ClientBuilder::default().api_key("api_key").build().unwrap();
+        let client = AnthropicBuilder::default()
+            .api_key("api_key")
+            .build()
+            .unwrap();
         let request = MessagesRequest {
             messages: Messages::default(),
             tools: Tools::new(),
@@ -831,7 +852,7 @@ mod test {
     async fn test_messages_stream_request_builder() {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
         let client = reqwest::Client::new();
-        let anthropic = ClientBuilder::default()
+        let anthropic = AnthropicBuilder::default()
             .api_key(api_key)
             .client(&client)
             .build()
@@ -874,7 +895,7 @@ mod test {
 
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
         let client = reqwest::Client::new();
-        let anthropic = ClientBuilder::default()
+        let anthropic = AnthropicBuilder::default()
             .api_key(api_key)
             .client(&client)
             .build()

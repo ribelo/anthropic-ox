@@ -16,7 +16,7 @@ cfg_if::cfg_if! {
 
 #[derive(Derivative)]
 #[derivative(Default)]
-pub struct ClientBuilder {
+pub struct AnthropicBuilder {
     api_key: Option<String>,
     #[derivative(Default(value = r#""2023-06-01".to_string()"#))]
     version: String,
@@ -27,7 +27,7 @@ pub struct ClientBuilder {
 
 #[derive(Clone, Derivative)]
 #[derivative(Debug)]
-pub struct Client {
+pub struct Anthropic {
     api_key: String,
     version: String,
     client: reqwest::Client,
@@ -42,9 +42,9 @@ pub enum ClientBuilderError {
     ApiKeyNotSet,
 }
 
-impl Client {
-    pub fn builder() -> ClientBuilder {
-        ClientBuilder::default()
+impl Anthropic {
+    pub fn builder() -> AnthropicBuilder {
+        AnthropicBuilder::default()
     }
 
     pub fn messages(&self) -> MessagesRequestBuilder {
@@ -55,28 +55,28 @@ impl Client {
     }
 }
 
-impl ClientBuilder {
+impl AnthropicBuilder {
     pub fn new() -> Self {
         Default::default()
     }
 
-    pub fn api_key<T: ToString>(mut self, api_key: T) -> ClientBuilder {
+    pub fn api_key<T: ToString>(mut self, api_key: T) -> AnthropicBuilder {
         self.api_key = Some(api_key.to_string());
         self
     }
 
-    pub fn client(mut self, client: &reqwest::Client) -> ClientBuilder {
+    pub fn client(mut self, client: &reqwest::Client) -> AnthropicBuilder {
         self.client = Some(client.clone());
         self
     }
 
     #[cfg(feature = "leaky-bucket")]
-    pub fn limiter(mut self, leaky_bucket: RateLimiter) -> ClientBuilder {
+    pub fn limiter(mut self, leaky_bucket: RateLimiter) -> AnthropicBuilder {
         self.leaky_bucket = Some(leaky_bucket);
         self
     }
 
-    pub fn build(self) -> Result<Client, ClientBuilderError> {
+    pub fn build(self) -> Result<Anthropic, ClientBuilderError> {
         let Some(api_key) = self.api_key else {
             return Err(ClientBuilderError::ApiKeyNotSet);
         };
@@ -86,7 +86,7 @@ impl ClientBuilder {
         #[cfg(feature = "leaky-bucket")]
         let leaky_bucket = self.leaky_bucket.map(Arc::new);
 
-        Ok(Client {
+        Ok(Anthropic {
             api_key,
             version: self.version,
             client,
