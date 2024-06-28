@@ -155,6 +155,17 @@ impl From<std::borrow::Cow<'_, str>> for Text {
     }
 }
 
+impl From<serde_json::Value> for Text {
+    fn from(value: serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::String(s) => Text { text: s },
+            _ => Text {
+                text: value.to_string(),
+            },
+        }
+    }
+}
+
 impl From<Text> for String {
     fn from(text: Text) -> Self {
         text.text
@@ -176,39 +187,50 @@ pub enum MultimodalContent {
     ToolResult(ToolResult),
 }
 
-impl From<String> for MultimodalContent {
-    fn from(text: String) -> Self {
-        MultimodalContent::Text(text.into())
+impl MultimodalContent {
+    pub fn as_text(&self) -> Option<&Text> {
+        if let Self::Text(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_image(&self) -> Option<&Image> {
+        if let Self::Image(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_tool_use(&self) -> Option<&ToolUse> {
+        if let Self::ToolUse(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_tool_result(&self) -> Option<&ToolResult> {
+        if let Self::ToolResult(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_json(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Text(text) => serde_json::from_str(&text.text).ok(),
+            _ => None,
+        }
     }
 }
 
-impl From<&str> for MultimodalContent {
-    fn from(text: &str) -> Self {
+impl<T: Into<Text>> From<T> for MultimodalContent {
+    fn from(text: T) -> Self {
         MultimodalContent::Text(text.into())
-    }
-}
-
-impl From<&String> for MultimodalContent {
-    fn from(text: &String) -> Self {
-        MultimodalContent::Text(text.into())
-    }
-}
-
-impl From<Box<str>> for MultimodalContent {
-    fn from(text: Box<str>) -> Self {
-        MultimodalContent::Text(text.into())
-    }
-}
-
-impl From<std::borrow::Cow<'_, str>> for MultimodalContent {
-    fn from(text: std::borrow::Cow<'_, str>) -> Self {
-        MultimodalContent::Text(text.into())
-    }
-}
-
-impl From<Text> for MultimodalContent {
-    fn from(text: Text) -> Self {
-        MultimodalContent::Text(text)
     }
 }
 
@@ -306,12 +328,6 @@ impl From<UserMessage> for Vec<MultimodalContent> {
     }
 }
 
-impl<T: Into<MultimodalContent>> Extend<T> for UserMessage {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.content.extend(iter.into_iter().map(Into::into));
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Derivative, Clone, PartialEq, Eq)]
 pub struct AssistantMessage {
     #[derivative(Default(value = "Role::Assistant"))]
@@ -395,12 +411,6 @@ impl From<Vec<MultimodalContent>> for AssistantMessage {
 impl From<AssistantMessage> for Vec<MultimodalContent> {
     fn from(message: AssistantMessage) -> Self {
         message.content
-    }
-}
-
-impl<T: Into<MultimodalContent>> Extend<T> for AssistantMessage {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.content.extend(iter.into_iter().map(Into::into));
     }
 }
 
@@ -503,7 +513,7 @@ impl Messages {
         Self(Vec::with_capacity(capacity))
     }
 
-    pub fn add_message(&mut self, message: impl Into<Message>) {
+    pub fn add_message<T: Into<Message>>(&mut self, message: T) {
         self.0.push(message.into());
     }
 
@@ -558,18 +568,6 @@ where
 {
     fn from(value: T) -> Self {
         Messages(vec![Message::User(value.into())])
-    }
-}
-
-impl<T> Extend<T> for Messages
-where
-    T: Into<Message>,
-{
-    fn extend<I>(&mut self, iter: I)
-    where
-        I: IntoIterator<Item = T>,
-    {
-        self.0.extend(iter.into_iter().map(Into::into));
     }
 }
 

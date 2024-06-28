@@ -1,12 +1,17 @@
+use async_trait::async_trait;
+use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
     fmt,
+    future::Future,
     marker::PhantomData,
     sync::Arc,
 };
+
+use super::message::MultimodalContent;
 
 #[derive(Default)]
 pub struct ToolBuilder {
@@ -26,19 +31,19 @@ pub enum ToolBuilderError {
 
 impl ToolBuilder {
     #[must_use]
-    pub fn name<S: Into<String>>(mut self, name: S) -> Self {
+    pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
         self.name = Some(name.into());
         self
     }
 
     #[must_use]
-    pub fn description<S: Into<String>>(mut self, description: S) -> Self {
+    pub fn with_description<S: Into<String>>(mut self, description: S) -> Self {
         self.description = Some(description.into());
         self
     }
 
     #[must_use]
-    pub fn handler<H, T, R>(mut self, handler: H) -> Self
+    pub fn with_handler<H, T, R>(mut self, handler: H) -> Self
     where
         H: ToolHandler<T, R> + Send + Sync + 'static,
         T: JsonSchema + DeserializeOwned + Send + Sync + 'static,
@@ -62,7 +67,7 @@ impl ToolBuilder {
     }
 
     #[must_use]
-    pub fn props<T>(mut self) -> Self
+    pub fn with_props<T>(mut self) -> Self
     where
         T: JsonSchema + DeserializeOwned + Send + Sync + 'static,
     {
@@ -117,31 +122,25 @@ pub enum ToolError {
     InputDeserializationFailed(String),
     #[error("Failed to serialize output: {0}")]
     OutputSerializationFailed(String),
+    #[error("Failed to invoke tool: {0}")]
+    InvokeFailed(String),
 }
 
 impl Tool {
     pub fn builder() -> ToolBuilder {
         ToolBuilder::default()
     }
-    pub fn invoke<T: Into<String>>(
+    pub async fn invoke<T: Into<String>>(
         &self,
         id: T,
         input: serde_json::Value,
-        context: &ToolContext,
+        context: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let handler = self.handler.as_ref().ok_or(ToolError::HandlerNotSet)?;
 
-        match handler.call(input, context) {
-            Ok(content) => Ok(ToolResult {
-                id: id.into(),
-                content,
-                is_error: false,
-            }),
-            Err(err) => Ok(ToolResult {
-                id: id.into(),
-                content: serde_json::json!(err.to_string()),
-                is_error: true,
-            }),
+        match handler.call(input, context).await {
+            Ok(content) => Ok(ToolResult::new(id, content)),
+            Err(err) => Ok(ToolResult::error(id, err)),
         }
     }
 }
@@ -154,7 +153,7 @@ impl PartialEq for Tool {
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
-    resources: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    resources: Arc<Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
 }
 
 impl ToolContext {
@@ -163,17 +162,17 @@ impl ToolContext {
     }
 
     pub fn add_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
-        self.resources.insert(TypeId::of::<T>(), Arc::new(resource));
-    }
-
-    pub fn with_resource<T: Any + Send + Sync + Clone>(mut self, resource: T) -> Self {
-        self.add_resource(resource);
-        self
+        self.resources
+            .lock()
+            .insert(TypeId::of::<T>(), Box::new(resource));
     }
 
     pub fn get_resource<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
-        let boxed_resource = self.resources.get(&TypeId::of::<T>())?;
-        Some(boxed_resource.downcast_ref::<T>().unwrap().clone())
+        self.resources
+            .lock()
+            .get(&TypeId::of::<T>())
+            .and_then(|boxed| boxed.downcast_ref::<T>())
+            .cloned()
     }
 
     pub fn expect_resource<T: Any + Send + Sync + Clone>(&self) -> T {
@@ -181,18 +180,20 @@ impl ToolContext {
             .unwrap_or_else(|| panic!("Resource of type {} not found", std::any::type_name::<T>()))
     }
 
-    pub fn remove_resource<T: Any + Send + Sync>(&mut self) -> Option<Arc<T>> {
+    pub fn remove_resource<T: Any + Send + Sync>(&mut self) -> Option<T> {
         self.resources
+            .lock()
             .remove(&TypeId::of::<T>())
-            .and_then(|r| r.downcast::<T>().ok())
+            .and_then(|boxed| boxed.downcast::<T>().ok())
+            .map(|boxed| *boxed)
     }
 
     pub fn len(&self) -> usize {
-        self.resources.len()
+        self.resources.lock().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.resources.is_empty()
+        self.resources.lock().is_empty()
     }
 }
 
@@ -206,6 +207,15 @@ impl std::fmt::Display for ToolContext {
 pub struct Tools {
     tools: HashMap<String, Tool>,
     context: ToolContext,
+}
+
+impl Extend<Tool> for Tools {
+    fn extend<T: IntoIterator<Item = Tool>>(&mut self, iter: T) {
+        for tool in iter {
+            let name = tool.name.clone();
+            self.tools.insert(name, tool);
+        }
+    }
 }
 
 impl Serialize for Tools {
@@ -223,9 +233,8 @@ impl Tools {
         Tools::default()
     }
 
-    pub fn with_tool(mut self, tool: Tool) -> Self {
-        self.add_tool(tool);
-        self
+    pub fn set_context(&mut self, cx: ToolContext) {
+        self.context = cx
     }
 
     pub fn add_tool(&mut self, tool: Tool) {
@@ -248,10 +257,13 @@ impl Tools {
         self.context.expect_resource()
     }
 
-    pub fn invoke(&self, tool_use: ToolUse) -> Result<ToolResult, ToolError> {
-        self.get_tool(&tool_use.name)
-            .ok_or(ToolError::ToolNotFound(tool_use.name.clone()))
-            .and_then(|tool| tool.invoke(tool_use.id, tool_use.input, &self.context))
+    pub async fn invoke(&self, tool_use: ToolUse) -> Result<ToolResult, ToolError> {
+        let tool = self
+            .get_tool(&tool_use.name)
+            .ok_or_else(|| ToolError::ToolNotFound(tool_use.name.clone()))?;
+
+        tool.invoke(tool_use.id, tool_use.input, self.context.clone())
+            .await
     }
 
     pub fn is_empty(&self) -> bool {
@@ -279,7 +291,9 @@ impl FromIterator<Tool> for Tools {
 
 impl From<Tool> for Tools {
     fn from(tool: Tool) -> Self {
-        Tools::new().with_tool(tool)
+        let mut tools = Tools::default();
+        tools.add_tool(tool);
+        tools
     }
 }
 
@@ -348,24 +362,28 @@ impl std::fmt::Display for ToolUse {
 pub struct ToolResult {
     #[serde(rename = "tool_use_id")]
     pub id: String,
-    pub content: serde_json::Value,
+    pub content: Vec<MultimodalContent>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
 }
 
 impl ToolResult {
-    pub fn new(id: String, content: serde_json::Value) -> Self {
+    pub fn new<T: Into<String>, U: Into<MultimodalContent>>(id: T, content: U) -> Self {
         Self {
-            id,
-            content,
+            id: id.into(),
+            content: vec![content.into()],
             is_error: false,
         }
     }
 
-    pub fn error(id: String, error_content: serde_json::Value) -> Self {
+    pub fn add_content<T: Into<MultimodalContent>>(&mut self, content: T) {
+        self.content.push(content.into());
+    }
+
+    pub fn error<T: Into<String>>(id: T, error: ToolError) -> Self {
         Self {
-            id,
-            content: error_content,
+            id: id.into(),
+            content: vec![error.to_string().into()],
             is_error: true,
         }
     }
@@ -374,14 +392,12 @@ impl ToolResult {
         !self.is_error
     }
 
-    pub fn content(&self) -> &serde_json::Value {
+    pub fn content(&self) -> &[MultimodalContent] {
         &self.content
     }
 
-    pub fn deserialize_content<T: serde::de::DeserializeOwned>(
-        &self,
-    ) -> Result<T, serde_json::Error> {
-        serde_json::from_value(self.content.clone())
+    pub fn into_content(self) -> Vec<MultimodalContent> {
+        self.content
     }
 }
 
@@ -395,25 +411,30 @@ impl std::fmt::Display for ToolResult {
     }
 }
 
+#[async_trait]
 pub trait ToolHandler<T, R> {
-    fn call(&self, input: T, cx: &ToolContext) -> Result<R, ToolError>;
+    async fn call(&self, input: T, cx: ToolContext) -> Result<R, ToolError>;
 }
 
-impl<T, R, F> ToolHandler<T, R> for F
+#[async_trait]
+impl<T, R, F, Fut> ToolHandler<T, R> for F
 where
-    F: Fn(T, &ToolContext) -> Result<R, ToolError>,
-    R: Serialize,
+    T: Send + 'static,
+    R: Serialize + Send + 'static,
+    F: Fn(T, ToolContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<R, ToolError>> + Send,
 {
-    fn call(&self, input: T, cx: &ToolContext) -> Result<R, ToolError> {
-        (self)(input, cx)
+    async fn call(&self, input: T, cx: ToolContext) -> Result<R, ToolError> {
+        (self)(input, cx).await
     }
 }
 
+#[async_trait]
 pub trait ErasedToolHandler: Send + Sync {
-    fn call(
+    async fn call(
         &self,
         input: serde_json::Value,
-        cx: &ToolContext,
+        cx: ToolContext,
     ) -> Result<serde_json::Value, ToolError>;
 }
 
@@ -432,20 +453,21 @@ where
     pub phantom: PhantomData<(T, R)>,
 }
 
+#[async_trait]
 impl<H, T, R> ErasedToolHandler for ToolHandlerWrapper<H, T, R>
 where
     H: ToolHandler<T, R> + Send + Sync,
     T: JsonSchema + DeserializeOwned + Send + Sync,
     R: Serialize + Send + Sync,
 {
-    fn call(
+    async fn call(
         &self,
         input: serde_json::Value,
-        cx: &ToolContext,
+        cx: ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
         let props: T = serde_json::from_value(input)
             .map_err(|e| ToolError::InputDeserializationFailed(e.to_string()))?;
-        let result = self.handler.call(props, &cx)?;
+        let result = self.handler.call(props, cx).await?;
         serde_json::to_value(result)
             .map_err(|e| ToolError::OutputSerializationFailed(e.to_string()))
     }
@@ -464,15 +486,18 @@ mod tests {
         age: i32,
     }
 
-    fn empty_handler(_input: Props, _cx: &ToolContext) -> Result<serde_json::Value, ToolError> {
+    async fn empty_handler(
+        _input: Props,
+        _cx: ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
         Ok(json!({}))
     }
 
-    #[test]
-    fn test_tool_empty_handler() {
+    #[tokio::test]
+    async fn test_tool_empty_handler() {
         let tool = Tool::builder()
-            .name("user_create")
-            .handler(empty_handler)
+            .with_name("user_create")
+            .with_handler(empty_handler)
             .build()
             .unwrap();
 
@@ -484,16 +509,16 @@ mod tests {
             "age": 30,
         });
 
-        let result = tool.invoke("id", input, &context).unwrap();
+        let result = tool.invoke("id", input, context).await.unwrap();
         assert_eq!(result.id, "id");
-        assert_eq!(result.content, json!({}));
+        assert_eq!(result.content[0].as_json().unwrap(), json!({}));
     }
 
-    #[test]
-    fn test_tool_handler() {
-        fn handler(
+    #[tokio::test]
+    async fn test_tool_handler() {
+        async fn handler(
             input: serde_json::Value,
-            _cx: &ToolContext,
+            _cx: ToolContext,
         ) -> Result<serde_json::Value, ToolError> {
             Ok(json!({
             "name": input["name"],
@@ -503,8 +528,8 @@ mod tests {
         }
 
         let tool = Tool::builder()
-            .name("user_create")
-            .handler(handler)
+            .with_name("user_create")
+            .with_handler(handler)
             .build()
             .unwrap();
 
@@ -517,10 +542,11 @@ mod tests {
         });
 
         let result = tool
-            .invoke("id".to_owned(), input.clone(), &context)
+            .invoke("id".to_owned(), input.clone(), context)
+            .await
             .unwrap();
         assert_eq!(result.id, "id");
-        assert_eq!(result.content, input);
+        assert_eq!(result.content[0].as_json().unwrap(), input);
     }
 
     #[test]
@@ -563,11 +589,11 @@ mod tests {
         value: i32,
     }
 
-    #[test]
-    fn test_tool_handler_with_context() {
-        fn handler(
+    #[tokio::test]
+    async fn test_tool_handler_with_context() {
+        async fn handler(
             input: serde_json::Value,
-            cx: &ToolContext,
+            cx: ToolContext,
         ) -> Result<serde_json::Value, ToolError> {
             let salary = cx.expect_resource::<i32>();
             Ok(json!({
@@ -579,12 +605,13 @@ mod tests {
         }
 
         let tool = Tool::builder()
-            .name("user_create")
-            .handler(handler)
+            .with_name("user_create")
+            .with_handler(handler)
             .build()
             .unwrap();
 
-        let context = ToolContext::default().with_resource(1000_i32);
+        let mut context = ToolContext::default();
+        context.add_resource(1000_i32);
 
         let input = serde_json::json!({
             "name": "John Doe",
@@ -593,9 +620,10 @@ mod tests {
         });
 
         let result = tool
-            .invoke("id".to_owned(), input.clone(), &context)
+            .invoke("id".to_owned(), input.clone(), context)
+            .await
             .unwrap();
         assert_eq!(result.id, "id");
-        assert_eq!(result.content["salary"], 1000_i32);
+        assert_eq!(result.content[0].as_json().unwrap()["salary"], 1000_i32);
     }
 }

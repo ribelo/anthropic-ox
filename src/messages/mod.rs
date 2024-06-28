@@ -205,8 +205,19 @@ impl MessagesResponse {
             })
             .collect()
     }
+
     pub fn tool_uses(&self) -> impl Iterator<Item = &ToolUse> {
         self.content.iter().filter_map(|content| {
+            if let MultimodalContent::ToolUse(tool_use) = content {
+                Some(tool_use)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn tool_uses_owned(self) -> impl Iterator<Item = ToolUse> {
+        self.content.into_iter().filter_map(|content| {
             if let MultimodalContent::ToolUse(tool_use) = content {
                 Some(tool_use)
             } else {
@@ -223,6 +234,12 @@ impl MessagesResponse {
                 None
             }
         })
+    }
+
+    pub fn has_tool_use(&self) -> bool {
+        self.content
+            .iter()
+            .any(|content| matches!(content, MultimodalContent::ToolUse(_)))
     }
 }
 
@@ -439,8 +456,8 @@ mod test {
     #[test]
     fn test_messages_request_builder_tools() {
         let tools = Tools::from(vec![Tool::builder()
-            .name("tool1")
-            .handler(empty_handler)
+            .with_name("tool1")
+            .with_handler(empty_handler)
             .build()
             .unwrap()]);
         let builder = MessagesRequestBuilder::new().with_tools(tools.clone());
@@ -450,8 +467,8 @@ mod test {
     #[test]
     fn test_messages_request_builder_add_tool() {
         let tool = Tool::builder()
-            .name("tool1")
-            .handler(empty_handler)
+            .with_name("tool1")
+            .with_handler(empty_handler)
             .build()
             .unwrap();
         let builder = MessagesRequestBuilder::new().add_tool(tool);
@@ -902,14 +919,14 @@ mod test {
             .unwrap();
 
         let test_tool = Tool::builder()
-            .name("test_tool")
-            .handler(test_handler)
+            .with_name("test_tool")
+            .with_handler(test_handler)
             .build()
             .unwrap();
 
         let finish_tool = Tool::builder()
-            .name("finish_test")
-            .handler(finish_handler)
+            .with_name("finish_test")
+            .with_handler(finish_handler)
             .build()
             .unwrap();
 

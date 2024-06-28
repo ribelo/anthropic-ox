@@ -3,7 +3,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 pub mod messages;
-pub mod tools;
+
 const BASE_URL: &str = "https://api.anthropic.com";
 
 cfg_if::cfg_if! {
