@@ -1,15 +1,16 @@
 pub mod message;
 pub mod tools;
 
-use std::fmt;
+use std::pin::Pin;
 
+use message::Text;
 use reqwest_eventsource::{self, Event, EventSource, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_stream::{Stream, StreamExt};
-use tools::ToolUse;
+use tools::{ToolContext, ToolResult, ToolUse, ToolUseBuilder};
 
-use crate::{Anthropic, ApiRequestError, ErrorResponse, BASE_URL};
+use crate::{Anthropic, ApiError, ApiErrorDetail, ErrorInfo, BASE_URL};
 
 use self::{
     message::{Message, Messages, MultimodalContent, Role},
@@ -78,7 +79,7 @@ impl MessagesRequestBuilder {
         self
     }
 
-    pub fn add_message<T: Into<Message>>(mut self, message: T) -> Self {
+    pub fn with_message<T: Into<Message>>(mut self, message: T) -> Self {
         self.messages
             .get_or_insert_with(Messages::default)
             .add_message(message);
@@ -93,7 +94,7 @@ impl MessagesRequestBuilder {
     pub fn add_tool(mut self, tool: impl Into<Tool>) -> Self {
         self.tools
             .get_or_insert_with(Tools::default)
-            .add_tool(tool.into());
+            .add(tool.into());
         self
     }
 
@@ -174,10 +175,10 @@ pub enum StopReason {
     ToolUse,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Usage {
-    input_tokens: u32,
-    output_tokens: u32,
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -241,6 +242,24 @@ impl MessagesResponse {
             .iter()
             .any(|content| matches!(content, MultimodalContent::ToolUse(_)))
     }
+
+    pub async fn invoke_tools(&self, tools: &Tools, cx: &ToolContext) -> Vec<ToolResult> {
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for tool_use in self.tool_uses() {
+            let tools = tools.clone();
+            let cx = cx.clone();
+            let tool_use = tool_use.clone();
+            join_set.spawn(async move { tools.invoke(tool_use, cx).await });
+        }
+
+        let mut tool_results = Vec::new();
+        while let Some(result) = join_set.join_next().await {
+            tool_results.push(result.unwrap())
+        }
+
+        tool_results
+    }
 }
 
 impl From<MessagesResponse> for Message {
@@ -272,23 +291,195 @@ impl std::fmt::Display for MessagesResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MessagesStreamDelta {
-    pub r#type: String,
-    pub text: String,
+#[derive(Debug, Default)]
+pub struct MessagesResponseBuilder {
+    id: Option<String>,
+    r#type: Option<String>,
+    role: Option<Role>,
+    content: Vec<MultimodalContent>,
+    model: Option<String>,
+    stop_reason: Option<StopReason>,
+    stop_sequence: Option<String>,
+    usage: Usage,
+    text_builder: Option<Text>,
+    tool_use_builder: Option<ToolUseBuilder>,
 }
 
-impl fmt::Display for MessagesStreamDelta {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.text)
+#[derive(Debug, Error)]
+pub enum MessagesResponseBuilderError {
+    #[error("Missing id")]
+    MissingId,
+    #[error("Missing type")]
+    MissingType,
+    #[error("Missing role")]
+    MissingRole,
+    #[error("Missing model")]
+    MissingModel,
+}
+
+impl MessagesResponseBuilder {
+    pub fn build(self) -> Result<MessagesResponse, MessagesResponseBuilderError> {
+        let id = self.id.ok_or(MessagesResponseBuilderError::MissingId)?;
+        let r#type = self
+            .r#type
+            .ok_or(MessagesResponseBuilderError::MissingType)?;
+        let role = self.role.ok_or(MessagesResponseBuilderError::MissingRole)?;
+        let model = self
+            .model
+            .ok_or(MessagesResponseBuilderError::MissingModel)?;
+
+        Ok(MessagesResponse {
+            id,
+            r#type,
+            role,
+            content: self.content,
+            model,
+            stop_reason: self.stop_reason,
+            stop_sequence: self.stop_sequence,
+            usage: self.usage,
+        })
+    }
+
+    pub fn push_event(&mut self, event: EventData) {
+        match event {
+            EventData::MessageStart { message } => {
+                self.id = Some(message.id);
+                self.r#type = Some(message.r#type);
+                self.role = Some(message.role);
+                self.model = Some(message.model);
+                self.content = message.content;
+                self.stop_reason = message.stop_reason;
+                self.stop_sequence = message.stop_sequence;
+                self.usage = message.usage;
+            }
+            EventData::ContentBlockStart { content_block, .. } => match content_block {
+                ContentBlock::Text { .. } => {
+                    self.text_builder.replace(Text::default());
+                }
+                ContentBlock::ToolUse { id, name, .. } => {
+                    self.tool_use_builder.replace(ToolUseBuilder::new(id, name));
+                }
+            },
+            EventData::ContentBlockDelta { delta, .. } => {
+                match &delta {
+                    ContentBlockDelta::TextDelta { text } => {
+                        if let Some(x) = self.text_builder.as_mut() {
+                            x.push_str(text);
+                        }
+                    }
+                    ContentBlockDelta::InputJsonDelta { partial_json } => {
+                        if let Some(x) = self.tool_use_builder.as_mut() {
+                            x.push_str(partial_json);
+                        }
+                    }
+                };
+            }
+            EventData::ContentBlockStop { .. } => {
+                if let Some(text_builder) = self.text_builder.take() {
+                    let content = MultimodalContent::Text(text_builder);
+                    self.content.push(content);
+                } else if let Some(tool_use_builder) = self.tool_use_builder.take() {
+                    let tool_use = tool_use_builder.build().unwrap();
+                    let content = MultimodalContent::ToolUse(tool_use);
+                    self.content.push(content);
+                } else {
+                    unreachable!()
+                }
+            }
+            EventData::MessageDelta { usage, .. } => {
+                if let Some(usage) = usage {
+                    self.usage.input_tokens = usage.input_tokens.or(self.usage.input_tokens);
+                    self.usage.output_tokens = usage.output_tokens.or(self.usage.output_tokens);
+                }
+            }
+            EventData::MessageStop | EventData::Ping => {}
+            // TODO:
+            EventData::Error { .. } => {}
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContentBlockDelta {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamMessage {
+    pub id: String,
     pub r#type: String,
-    pub index: u32,
-    pub delta: MessagesStreamDelta,
+    pub role: Role,
+    pub content: Vec<MultimodalContent>,
+    pub model: String,
+    pub stop_reason: Option<StopReason>,
+    pub stop_sequence: Option<String>,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventData {
+    MessageStart {
+        message: StreamMessage,
+    },
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlock,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: ContentBlockDelta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: MessageDelta,
+        usage: Option<Usage>,
+    },
+    MessageStop,
+    Ping,
+    Error {
+        error: ErrorInfo,
+    },
+}
+
+pub type EventStream = Pin<Box<dyn Stream<Item = Result<EventData, ApiError>> + Send>>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlockDelta {
+    TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageDelta {
+    pub stop_reason: Option<String>,
+    pub stop_sequence: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorResponse {
+    error: ApiErrorDetail,
+}
+
+impl From<ErrorResponse> for ApiError {
+    fn from(response: ErrorResponse) -> Self {
+        ApiError::InvalidRequest {
+            message: response.error.message,
+            param: response.error.param,
+            code: response.error.code,
+        }
+    }
 }
 
 impl MessagesRequest {
@@ -301,10 +492,10 @@ impl MessagesRequest {
         self
     }
 
-    pub async fn send(&self) -> Result<MessagesResponse, ApiRequestError> {
+    pub async fn send(&self) -> Result<MessagesResponse, ApiError> {
         let url = format!("{}/{}", BASE_URL, API_URL);
-        let body = serde_json::to_value(self)
-            .map_err(|e| ApiRequestError::Serialization(e.to_string()))?;
+        let body =
+            serde_json::to_value(self).map_err(|e| ApiError::Serialization(e.to_string()))?;
 
         let response = self
             .client
@@ -321,29 +512,25 @@ impl MessagesRequest {
             200 | 201 => response
                 .json()
                 .await
-                .map_err(|e| ApiRequestError::Deserialization(e.to_string())),
-            429 => Err(ApiRequestError::RateLimit),
+                .map_err(|e| ApiError::Deserialization(e.to_string())),
+            429 => Err(ApiError::RateLimit),
             _ => {
-                let status = response.status();
                 let error_response: ErrorResponse = response
                     .json()
                     .await
-                    .map_err(|e| ApiRequestError::Deserialization(e.to_string()))?;
-                Err(ApiRequestError::InvalidRequest {
+                    .map_err(|e| ApiError::Deserialization(e.to_string()))?;
+                Err(ApiError::InvalidRequest {
                     message: error_response.error.message,
                     param: error_response.error.param,
                     code: error_response.error.code,
-                    status,
                 })
             }
         }
     }
 
-    pub async fn stream(&self) -> impl Stream<Item = Result<MessagesStreamDelta, ApiRequestError>> {
+    pub fn stream(&self) -> impl Stream<Item = Result<EventData, ApiError>> {
         let url = format!("{}/{}", BASE_URL, API_URL);
-        let mut body = serde_json::to_value(self)
-            .map_err(|e| ApiRequestError::Serialization(e.to_string()))
-            .expect("Failed to serialize request");
+        let mut body = serde_json::to_value(self).expect("Failed to serialize request");
         body["stream"] = serde_json::Value::Bool(true);
 
         let es = self
@@ -358,69 +545,84 @@ impl MessagesRequest {
             .eventsource()
             .expect("Failed to create EventSource");
 
-        tokio_stream::wrappers::ReceiverStream::new(self.process_event_stream(es))
+        tokio_stream::wrappers::UnboundedReceiverStream::new(process_event_stream(es))
     }
+}
 
-    fn process_event_stream(
-        &self,
-        mut es: EventSource,
-    ) -> tokio::sync::mpsc::Receiver<Result<MessagesStreamDelta, ApiRequestError>> {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
+fn process_event_stream(
+    mut es: EventSource,
+) -> tokio::sync::mpsc::UnboundedReceiver<Result<EventData, ApiError>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        tokio::spawn(async move {
-            while let Some(event) = es.next().await {
-                match event {
-                    Ok(Event::Open) => {}
-                    Ok(Event::Message(msg)) => match msg.event.as_str() {
-                        "message_start"
-                        | "content_block_start"
-                        | "ping"
-                        | "content_block_stop"
-                        | "message_delta" => {}
-                        "message_stop" => break,
-                        "content_block_delta" => {
-                            let result = serde_json::from_str::<ContentBlockDelta>(&msg.data)
-                                .map(|block| block.delta)
-                                .map_err(|e| ApiRequestError::Deserialization(e.to_string()));
-
-                            if tx.send(result).await.is_err() {
+    tokio::spawn(async move {
+        while let Some(event) = es.next().await {
+            match event {
+                Ok(Event::Open) => {}
+                Ok(Event::Message(msg)) => {
+                    match serde_json::from_str::<EventData>(msg.data.as_str()) {
+                        Ok(event_data) => match event_data {
+                            EventData::MessageStop => {
+                                if tx.send(Ok(event_data)).is_err() {
+                                    break;
+                                }
+                                es.close();
                                 break;
                             }
-                        }
-                        other => {
+                            EventData::Error { error } => {
+                                if tx.send(Err(error.into())).is_err() {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                if tx.send(Ok(event_data)).is_err() {
+                                    break;
+                                }
+                            }
+                        },
+                        Err(e) => {
                             if tx
-                                .send(Err(ApiRequestError::UnknownEventType(other.to_string())))
-                                .await
+                                .send(Err(ApiError::Deserialization(e.to_string())))
                                 .is_err()
                             {
                                 break;
                             }
                         }
-                    },
-                    Err(e) => {
-                        if tx
-                            .send(Err(ApiRequestError::Stream(e.to_string())))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                    }
+                }
+
+                Err(e) => {
+                    let error = match e {
+                        reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
+                            match response.json::<ErrorResponse>().await {
+                                Ok(json) => ApiError::from(json),
+                                Err(e) => {
+                                    dbg!(e);
+                                    ApiError::UnexpectedResponse(format!(
+                                        "Invalid status code: {}",
+                                        status
+                                    ))
+                                }
+                            }
                         }
+                        _ => ApiError::Stream(e.to_string()),
+                    };
+
+                    es.close();
+                    if tx.send(Err(error)).is_err() {
+                        break;
                     }
                 }
             }
-        });
+        }
+    });
 
-        rx
-    }
+    rx
 }
 
 #[cfg(test)]
 mod test {
     use core::panic;
-    use std::{
-        collections::HashMap,
-        sync::{atomic::AtomicBool, Arc},
-    };
+    use std::sync::{atomic::AtomicBool, Arc};
 
     use message::UserMessage;
     use schemars::JsonSchema;
@@ -432,9 +634,9 @@ mod test {
 
     use super::*;
 
-    fn empty_handler(
+    async fn empty_handler(
         _input: serde_json::Value,
-        _cx: &ToolContext,
+        _cx: ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
         Ok(json!({}))
     }
@@ -449,7 +651,7 @@ mod test {
     #[test]
     fn test_messages_request_builder_add_message() {
         let message = Message::user(vec!["Hello"]);
-        let builder = MessagesRequestBuilder::new().add_message(message.clone());
+        let builder = MessagesRequestBuilder::new().with_message(message.clone());
         assert_eq!(builder.messages, Some(Messages::from(message)));
     }
 
@@ -461,7 +663,7 @@ mod test {
             .build()
             .unwrap()]);
         let builder = MessagesRequestBuilder::new().with_tools(tools.clone());
-        assert!(builder.tools.unwrap().get_tool("tool1").is_some());
+        assert!(builder.tools.unwrap().get("tool1").is_some());
     }
 
     #[test]
@@ -472,7 +674,7 @@ mod test {
             .build()
             .unwrap();
         let builder = MessagesRequestBuilder::new().add_tool(tool);
-        assert!(builder.tools.unwrap().get_tool("tool1").is_some());
+        assert!(builder.tools.unwrap().get("tool1").is_some());
     }
 
     #[test]
@@ -542,7 +744,7 @@ mod test {
 
     #[test]
     fn test_messages_request_builder_build_success() {
-        let messages = Messages::from("Hello");
+        let messages = Messages::from(vec!["Hello"]);
         let model = "claude-3-sonnet-20240229";
         let max_tokens = 100;
         let client = AnthropicBuilder::default()
@@ -586,7 +788,7 @@ mod test {
 
     #[test]
     fn test_messages_request_builder_build_model_not_set() {
-        let messages = Messages::from(UserMessage::from("Hello"));
+        let messages = Messages::from(vec![UserMessage::from("Hello")]);
         let max_tokens = 100;
         let client = AnthropicBuilder::default()
             .api_key("api_key")
@@ -607,7 +809,7 @@ mod test {
 
     #[test]
     fn test_messages_request_builder_build_max_tokens_not_set() {
-        let messages = Messages::from(UserMessage::from("Hello"));
+        let messages = Messages::from(vec![UserMessage::from("Hello")]);
         let model = "claude-3-sonnet-20240229";
         let client = AnthropicBuilder::default()
             .api_key("api_key")
@@ -628,7 +830,7 @@ mod test {
 
     #[test]
     fn test_messages_request_builder_build_client_not_set() {
-        let messages = Messages::from(UserMessage::from("Hello"));
+        let messages = Messages::from(vec![UserMessage::from("Hello")]);
         let model = "claude-3-sonnet-20240229";
         let max_tokens = 100;
 
@@ -682,72 +884,16 @@ mod test {
     }
 
     #[test]
-    fn test_usage_serialization() {
-        let usage = Usage {
-            input_tokens: 10,
-            output_tokens: 20,
-        };
-
-        assert_eq!(
-            serde_json::to_string(&usage).unwrap(),
-            r#"{"input_tokens":10,"output_tokens":20}"#
-        );
-    }
-
-    #[test]
     fn test_usage_deserialization() {
         let usage_json = r#"{"input_tokens":10,"output_tokens":20}"#;
         let expected_usage = Usage {
-            input_tokens: 10,
-            output_tokens: 20,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
         };
 
         assert_eq!(
             serde_json::from_str::<Usage>(usage_json).unwrap(),
             expected_usage
-        );
-    }
-
-    #[test]
-    fn test_messages_stream_delta_display() {
-        let delta = MessagesStreamDelta {
-            r#type: "type".to_string(),
-            text: "hello".to_string(),
-        };
-
-        assert_eq!(format!("{}", delta), "hello");
-    }
-
-    #[test]
-    fn test_content_block_delta_serialization() {
-        let delta = ContentBlockDelta {
-            r#type: "type".to_string(),
-            index: 1,
-            delta: MessagesStreamDelta {
-                r#type: "type".to_string(),
-                text: "hello".to_string(),
-            },
-        };
-
-        let expected_json = r#"{"type":"type","index":1,"delta":{"type":"type","text":"hello"}}"#;
-        assert_eq!(serde_json::to_string(&delta).unwrap(), expected_json);
-    }
-
-    #[test]
-    fn test_content_block_delta_deserialization() {
-        let delta_json = r#"{"type":"type","index":1,"delta":{"type":"type","text":"hello"}}"#;
-        let expected_delta = ContentBlockDelta {
-            r#type: "type".to_string(),
-            index: 1,
-            delta: MessagesStreamDelta {
-                r#type: "type".to_string(),
-                text: "hello".to_string(),
-            },
-        };
-
-        assert_eq!(
-            serde_json::from_str::<ContentBlockDelta>(delta_json).unwrap(),
-            expected_delta
         );
     }
 
@@ -824,8 +970,8 @@ mod test {
         assert_eq!(response.role, Role::Assistant);
         assert_eq!(response.model, "claude-3-sonnet-20240229");
         assert_eq!(response.stop_sequence, None);
-        assert_eq!(response.usage.input_tokens, 13);
-        assert_eq!(response.usage.output_tokens, 32);
+        assert_eq!(response.usage.input_tokens, Some(13));
+        assert_eq!(response.usage.output_tokens, Some(32));
         assert_eq!(response.content.len(), 1);
         assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
     }
@@ -839,8 +985,8 @@ mod test {
         model: "claude-3-sonnet-20240229".to_string(),
         stop_sequence: None,
         usage: Usage {
-            input_tokens: 13,
-            output_tokens: 32,
+            input_tokens: Some(13),
+            output_tokens: Some(32),
         },
         content: vec![MultimodalContent::Text(Text {text:"Hello John, it's nice to meet you! I'm Claude, an AI assistant created by Anthropic. How are you doing today?".to_string() })],
         stop_reason: Some(StopReason::EndTurn),
@@ -866,7 +1012,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_messages_stream_request_builder() {
+    async fn test_messages_stream_request() {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
         let client = reqwest::Client::new();
         let anthropic = AnthropicBuilder::default()
@@ -878,14 +1024,13 @@ mod test {
             .messages()
             .with_model("claude-3-sonnet-20240229")
             .with_max_tokens(512)
-            .with_messages(UserMessage::from("Hi, I'm John."))
+            .with_message(UserMessage::from("Hi, I'm John."))
             .build()
             .unwrap()
-            .stream()
-            .await;
+            .stream();
         // dbg!(res);
         while let Some(res) = res.next().await {
-            print!("{}", res.unwrap());
+            dbg!(res);
         }
     }
     #[tokio::test]
@@ -894,16 +1039,16 @@ mod test {
         struct TestHandlerProps {
             random_number: i32,
         }
-        fn test_handler(
+        async fn test_handler(
             _input: TestHandlerProps,
-            _cx: &ToolContext,
+            _cx: ToolContext,
         ) -> Result<serde_json::Value, ToolError> {
             Ok(json!("To finish this test write [finish_test]"))
         }
 
-        fn finish_handler(
+        async fn finish_handler(
             _input: serde_json::Value,
-            cx: &ToolContext,
+            cx: ToolContext,
         ) -> Result<serde_json::Value, ToolError> {
             let is_finished = cx.expect_resource::<Arc<AtomicBool>>();
             is_finished.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -931,9 +1076,11 @@ mod test {
             .unwrap();
 
         let is_finished = Arc::new(AtomicBool::new(false));
-        let mut tools = Tools::from(vec![test_tool, finish_tool]);
+        let tcx = ToolContext::default();
+        tcx.add_resource(is_finished.clone());
+
+        let tools = Tools::from(vec![test_tool, finish_tool]);
         println!("{}", serde_json::to_string_pretty(&tools).unwrap());
-        tools.add_resource(is_finished.clone());
 
         let mut messages = Messages::default();
         messages.add_message(UserMessage::from(
@@ -971,9 +1118,8 @@ mod test {
             let tools_used = res.tool_uses();
             let mut content = Vec::<MultimodalContent>::new();
             for tool in tools_used {
-                if let Ok(result) = tools.invoke(tool.clone()) {
-                    content.push(result.into());
-                }
+                let result = tools.invoke(tool.clone(), tcx.clone()).await;
+                content.push(result.into());
             }
             if !content.is_empty() {
                 content.push("Here you have the result.".into());

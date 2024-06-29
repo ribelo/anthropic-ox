@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::json;
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
@@ -112,8 +113,6 @@ pub struct Tool {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("Tool handler not set")]
-    HandlerNotSet,
     #[error("Failed to execute tool: {0}")]
     ExecutionFailed(String),
     #[error("Tool not found: {0}")]
@@ -122,25 +121,28 @@ pub enum ToolError {
     InputDeserializationFailed(String),
     #[error("Failed to serialize output: {0}")]
     OutputSerializationFailed(String),
-    #[error("Failed to invoke tool: {0}")]
-    InvokeFailed(String),
+    #[error("Missing handler for tool: {0}")]
+    MissingHandler(String),
 }
 
 impl Tool {
     pub fn builder() -> ToolBuilder {
         ToolBuilder::default()
     }
-    pub async fn invoke<T: Into<String>>(
-        &self,
-        id: T,
-        input: serde_json::Value,
-        context: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let handler = self.handler.as_ref().ok_or(ToolError::HandlerNotSet)?;
 
-        match handler.call(input, context).await {
-            Ok(content) => Ok(ToolResult::new(id, content)),
-            Err(err) => Ok(ToolResult::error(id, err)),
+    pub async fn invoke(
+        &self,
+        id: impl Into<String>,
+        input: &serde_json::Value,
+        context: ToolContext,
+    ) -> ToolResult {
+        let Some(handler) = self.handler.as_ref() else {
+            return ToolResult::error(id, ToolError::MissingHandler(self.name.clone()));
+        };
+
+        match handler.call(input.clone(), context).await {
+            Ok(content) => ToolResult::new(id.into(), content),
+            Err(err) => ToolResult::error(id.into(), err),
         }
     }
 }
@@ -161,7 +163,7 @@ impl ToolContext {
         Self::default()
     }
 
-    pub fn add_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
+    pub fn add_resource<T: Any + Send + Sync + Clone>(&self, resource: T) {
         self.resources
             .lock()
             .insert(TypeId::of::<T>(), Box::new(resource));
@@ -180,7 +182,7 @@ impl ToolContext {
             .unwrap_or_else(|| panic!("Resource of type {} not found", std::any::type_name::<T>()))
     }
 
-    pub fn remove_resource<T: Any + Send + Sync>(&mut self) -> Option<T> {
+    pub fn remove_resource<T: Any + Send + Sync>(&self) -> Option<T> {
         self.resources
             .lock()
             .remove(&TypeId::of::<T>())
@@ -195,6 +197,12 @@ impl ToolContext {
     pub fn is_empty(&self) -> bool {
         self.resources.lock().is_empty()
     }
+
+    pub fn extend(&mut self, other: ToolContext) {
+        let mut self_resources = self.resources.lock();
+        let mut other_resources = other.resources.lock();
+        self_resources.extend(other_resources.drain());
+    }
 }
 
 impl std::fmt::Display for ToolContext {
@@ -204,16 +212,13 @@ impl std::fmt::Display for ToolContext {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Tools {
-    tools: HashMap<String, Tool>,
-    context: ToolContext,
-}
+pub struct Tools(Arc<Mutex<HashMap<String, Tool>>>);
 
 impl Extend<Tool> for Tools {
     fn extend<T: IntoIterator<Item = Tool>>(&mut self, iter: T) {
         for tool in iter {
             let name = tool.name.clone();
-            self.tools.insert(name, tool);
+            self.0.lock().insert(name, tool);
         }
     }
 }
@@ -223,8 +228,9 @@ impl Serialize for Tools {
     where
         S: serde::ser::Serializer,
     {
-        let tools = self.tools.values().collect::<Vec<_>>();
-        tools.serialize(serializer)
+        let tools = self.0.lock();
+        let tool_vec: Vec<_> = tools.values().collect();
+        tool_vec.serialize(serializer)
     }
 }
 
@@ -233,49 +239,41 @@ impl Tools {
         Tools::default()
     }
 
-    pub fn set_context(&mut self, cx: ToolContext) {
-        self.context = cx
+    pub fn add(&mut self, tool: Tool) {
+        self.0.lock().insert(tool.name.clone(), tool);
     }
 
-    pub fn add_tool(&mut self, tool: Tool) {
-        self.tools.insert(tool.name.clone(), tool);
+    pub fn get(&self, tool_name: &str) -> Option<Tool> {
+        self.0.lock().get(tool_name).cloned()
     }
 
-    pub fn get_tool(&self, tool_name: &str) -> Option<&Tool> {
-        self.tools.get(tool_name)
+    pub fn get_handler(&self, tool_name: &str) -> Option<Arc<dyn ErasedToolHandler>> {
+        self.0
+            .lock()
+            .get(tool_name)
+            .and_then(|tool| tool.handler.clone())
     }
 
-    pub fn add_resource<T: Any + Send + Sync + Clone>(&mut self, resource: T) {
-        self.context.add_resource(resource);
-    }
+    pub async fn invoke(&self, tool_use: ToolUse, cx: ToolContext) -> ToolResult {
+        let Some(handler) = self.get_handler(&tool_use.name) else {
+            return ToolResult::error(
+                tool_use.id,
+                ToolError::MissingHandler(tool_use.name.clone()),
+            );
+        };
 
-    pub fn get_resource<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
-        self.context.get_resource()
-    }
-
-    pub fn expect_resource<T: Any + Send + Sync + Clone>(&self) -> T {
-        self.context.expect_resource()
-    }
-
-    pub async fn invoke(&self, tool_use: ToolUse) -> Result<ToolResult, ToolError> {
-        let tool = self
-            .get_tool(&tool_use.name)
-            .ok_or_else(|| ToolError::ToolNotFound(tool_use.name.clone()))?;
-
-        tool.invoke(tool_use.id, tool_use.input, self.context.clone())
-            .await
+        match handler.call(tool_use.input, cx).await {
+            Ok(content) => ToolResult::new(tool_use.id, content),
+            Err(err) => ToolResult::error(tool_use.id, err),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.0.lock().is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.tools.len()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Tool> {
-        self.tools.values()
+        self.0.lock().len()
     }
 }
 
@@ -283,7 +281,7 @@ impl FromIterator<Tool> for Tools {
     fn from_iter<I: IntoIterator<Item = Tool>>(iter: I) -> Self {
         let mut tools = Tools::new();
         for tool in iter {
-            tools.add_tool(tool);
+            tools.add(tool);
         }
         tools
     }
@@ -292,7 +290,7 @@ impl FromIterator<Tool> for Tools {
 impl From<Tool> for Tools {
     fn from(tool: Tool) -> Self {
         let mut tools = Tools::default();
-        tools.add_tool(tool);
+        tools.add(tool);
         tools
     }
 }
@@ -308,16 +306,41 @@ impl IntoIterator for Tools {
     type IntoIter = std::collections::hash_map::IntoValues<String, Tool>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.tools.into_values()
+        self.0.lock().clone().into_values()
     }
 }
 
-impl<'a> IntoIterator for &'a Tools {
-    type Item = &'a Tool;
-    type IntoIter = std::collections::hash_map::Values<'a, String, Tool>;
+#[derive(Debug, Clone)]
+pub struct ToolUseBuilder {
+    id: String,
+    name: String,
+    input: String,
+}
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.tools.values()
+impl ToolUseBuilder {
+    pub fn new<T: Into<String>>(id: T, name: T) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            input: String::new(),
+        }
+    }
+
+    pub fn push_str(&mut self, s: &str) -> &mut Self {
+        self.input.push_str(s);
+        self
+    }
+
+    pub fn build(self) -> Result<ToolUse, serde_json::Error> {
+        Ok(ToolUse {
+            id: self.id,
+            name: self.name,
+            input: if self.input.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&self.input)?
+            },
+        })
     }
 }
 
@@ -509,7 +532,7 @@ mod tests {
             "age": 30,
         });
 
-        let result = tool.invoke("id", input, context).await.unwrap();
+        let result = tool.invoke("id", &input, context).await;
         assert_eq!(result.id, "id");
         assert_eq!(result.content[0].as_json().unwrap(), json!({}));
     }
@@ -541,10 +564,7 @@ mod tests {
             "age": "30"
         });
 
-        let result = tool
-            .invoke("id".to_owned(), input.clone(), context)
-            .await
-            .unwrap();
+        let result = tool.invoke("id", &input, context).await;
         assert_eq!(result.id, "id");
         assert_eq!(result.content[0].as_json().unwrap(), input);
     }
@@ -619,10 +639,7 @@ mod tests {
             "age": "30"
         });
 
-        let result = tool
-            .invoke("id".to_owned(), input.clone(), context)
-            .await
-            .unwrap();
+        let result = tool.invoke("id", &input, context).await;
         assert_eq!(result.id, "id");
         assert_eq!(result.content[0].as_json().unwrap()["salary"], 1000_i32);
     }

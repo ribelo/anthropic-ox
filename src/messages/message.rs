@@ -76,11 +76,11 @@ impl Image {
 
 impl fmt::Display for Image {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "image: {}", self.source)
+        writeln!(f, "Image: {}", self.source)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Text {
     pub text: String,
 }
@@ -188,6 +188,22 @@ pub enum MultimodalContent {
 }
 
 impl MultimodalContent {
+    pub fn text<T: Into<String>>(text: T) -> Self {
+        Self::Text(Text { text: text.into() })
+    }
+
+    pub fn image(source: ImageSource) -> Self {
+        Self::Image(Image { source })
+    }
+
+    pub fn tool_use(tool_use: ToolUse) -> Self {
+        Self::ToolUse(tool_use)
+    }
+
+    pub fn tool_result(tool_result: ToolResult) -> Self {
+        Self::ToolResult(tool_result)
+    }
+
     pub fn as_text(&self) -> Option<&Text> {
         if let Self::Text(v) = self {
             Some(v)
@@ -295,11 +311,9 @@ impl UserMessage {
 
 impl fmt::Display for UserMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "User")?;
         if let Some(name) = &self.name {
-            write!(f, " ({})", name)?;
+            write!(f, "{}: ", name)?;
         }
-        write!(f, ": ")?;
         for (i, content) in self.content.iter().enumerate() {
             if i > 0 {
                 write!(f, " ")?;
@@ -335,6 +349,10 @@ pub struct AssistantMessage {
     pub content: Vec<MultimodalContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl AssistantMessage {
@@ -343,6 +361,8 @@ impl AssistantMessage {
             role: Role::Assistant,
             content: content.into_iter().map(Into::into).collect(),
             name: None,
+            id: None,
+            model: None,
         }
     }
 
@@ -381,11 +401,9 @@ impl AssistantMessage {
 
 impl fmt::Display for AssistantMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Assistant")?;
         if let Some(name) = &self.name {
-            write!(f, " ({})", name)?;
+            write!(f, "{}: ", name)?;
         }
-        write!(f, ": ")?;
         for (i, content) in self.content.iter().enumerate() {
             if i > 0 {
                 write!(f, " ")?;
@@ -466,6 +484,28 @@ impl Message {
             Message::Assistant(msg) => msg.name.as_deref(),
         }
     }
+
+    pub fn as_user(&self) -> Option<&UserMessage> {
+        match self {
+            Message::User(msg) => Some(msg),
+            _ => None,
+        }
+    }
+
+    pub fn as_assistant(&self) -> Option<&AssistantMessage> {
+        match self {
+            Message::Assistant(msg) => Some(msg),
+            _ => None,
+        }
+    }
+
+    pub fn expect_user(&self) -> &UserMessage {
+        self.as_user().expect("User message")
+    }
+
+    pub fn expect_assistant(&self) -> &AssistantMessage {
+        self.as_assistant().expect("Assistant message")
+    }
 }
 
 impl std::fmt::Display for Message {
@@ -513,6 +553,11 @@ impl Messages {
         Self(Vec::with_capacity(capacity))
     }
 
+    pub fn with_message<T: Into<Message>>(mut self, message: T) -> Self {
+        self.add_message(message);
+        self
+    }
+
     pub fn add_message<T: Into<Message>>(&mut self, message: T) {
         self.0.push(message.into());
     }
@@ -550,24 +595,18 @@ impl From<Message> for Messages {
     }
 }
 
-impl From<Vec<Message>> for Messages {
-    fn from(value: Vec<Message>) -> Self {
-        Messages(value)
-    }
-}
-
 impl From<AssistantMessage> for Messages {
     fn from(value: AssistantMessage) -> Self {
         Messages(vec![Message::Assistant(value)])
     }
 }
 
-impl<T> From<T> for Messages
+impl<T> From<Vec<T>> for Messages
 where
-    T: Into<UserMessage>,
+    T: Into<Message>,
 {
-    fn from(value: T) -> Self {
-        Messages(vec![Message::User(value.into())])
+    fn from(value: Vec<T>) -> Self {
+        Messages(value.into_iter().map(Into::into).collect())
     }
 }
 
@@ -816,6 +855,8 @@ mod tests {
                 text: "Hello".to_string(),
             })],
             name: Some("Assistant".to_string()),
+            id: None,
+            model: None,
         };
         let json = serde_json::to_string(&assistant_message).unwrap();
         assert_eq!(
@@ -842,6 +883,8 @@ mod tests {
                 text: "Hello".to_string(),
             })],
             name: None,
+            id: None,
+            model: None,
         };
         let json = serde_json::to_string(&assistant_message).unwrap();
         assert_eq!(
@@ -900,5 +943,9 @@ mod tests {
         dbg!(&serialized);
 
         assert!(serialized.contains(r#""type":"tool_use""#));
+    }
+    #[test]
+    fn test_stacktrace() {
+        panic!("foo")
     }
 }
