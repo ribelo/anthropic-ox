@@ -1,5 +1,5 @@
 pub mod message;
-pub mod tools;
+pub mod tool;
 
 use std::pin::Pin;
 
@@ -8,22 +8,19 @@ use reqwest_eventsource::{self, Event, EventSource, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_stream::{Stream, StreamExt};
-use tools::{ToolContext, ToolResult, ToolUse, ToolUseBuilder};
+use tool::{Tool, ToolBox, ToolResult, ToolUse, ToolUseBuilder};
 
 use crate::{Anthropic, ApiError, ApiErrorDetail, ErrorInfo, BASE_URL};
 
-use self::{
-    message::{Message, Messages, MultimodalContent, Role},
-    tools::{Tool, Tools},
-};
+use self::message::{Message, Messages, MultimodalContent, Role};
 
 const API_URL: &str = "v1/messages";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagesRequest {
     pub messages: Messages,
-    #[serde(skip_serializing_if = "Tools::is_empty")]
-    pub tools: Tools,
+    #[serde(skip_serializing_if = "ToolBox::is_empty")]
+    pub tools: ToolBox,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -45,7 +42,7 @@ pub struct MessagesRequest {
 #[derive(Debug, Default)]
 pub struct MessagesRequestBuilder {
     pub(crate) messages: Option<Messages>,
-    pub(crate) tools: Option<Tools>,
+    pub(crate) tools: Option<ToolBox>,
     pub(crate) model: Option<String>,
     pub(crate) system: Option<String>,
     pub(crate) max_tokens: Option<u32>,
@@ -86,15 +83,13 @@ impl MessagesRequestBuilder {
         self
     }
 
-    pub fn with_tools(mut self, tools: Tools) -> Self {
+    pub fn with_tools(mut self, tools: ToolBox) -> Self {
         self.tools = Some(tools);
         self
     }
 
-    pub fn add_tool(mut self, tool: impl Into<Tool>) -> Self {
-        self.tools
-            .get_or_insert_with(Tools::default)
-            .add(tool.into());
+    pub fn add_tool<T: Tool + 'static>(mut self, tool: T) -> Self {
+        self.tools.get_or_insert_with(ToolBox::default).add(tool);
         self
     }
 
@@ -243,22 +238,16 @@ impl MessagesResponse {
             .any(|content| matches!(content, MultimodalContent::ToolUse(_)))
     }
 
-    pub async fn invoke_tools(&self, tools: &Tools, cx: &ToolContext) -> Vec<ToolResult> {
-        let mut join_set = tokio::task::JoinSet::new();
+    pub async fn invoke_tools(&self, tools: &ToolBox) -> Vec<ToolResult> {
+        let tool_uses: Vec<_> = self.tool_uses().cloned().collect();
+        let mut results = Vec::with_capacity(tool_uses.len());
 
-        for tool_use in self.tool_uses() {
-            let tools = tools.clone();
-            let cx = cx.clone();
-            let tool_use = tool_use.clone();
-            join_set.spawn(async move { tools.invoke(tool_use, cx).await });
+        for tool_use in tool_uses {
+            let result = tools.invoke(tool_use).await;
+            results.push(result);
         }
 
-        let mut tool_results = Vec::new();
-        while let Some(result) = join_set.join_next().await {
-            tool_results.push(result.unwrap())
-        }
-
-        tool_results
+        results
     }
 }
 
@@ -624,21 +613,32 @@ mod test {
     use core::panic;
     use std::sync::{atomic::AtomicBool, Arc};
 
+    use async_trait::async_trait;
     use message::UserMessage;
     use schemars::JsonSchema;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use test::message::{MultimodalContent, Text};
-    use tools::{ToolContext, ToolError};
 
     use crate::AnthropicBuilder;
 
     use super::*;
 
-    async fn empty_handler(
-        _input: serde_json::Value,
-        _cx: ToolContext,
-    ) -> Result<serde_json::Value, ToolError> {
-        Ok(json!({}))
+    pub struct EmptyTool;
+
+    #[async_trait]
+    impl Tool for EmptyTool {
+        type Input = ();
+
+        type Output = ();
+
+        fn name(&self) -> &str {
+            "empty_tool"
+        }
+
+        async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, tool::ToolError> {
+            dbg!("EmptyTool");
+            Ok(())
+        }
     }
 
     #[test]
@@ -657,23 +657,14 @@ mod test {
 
     #[test]
     fn test_messages_request_builder_tools() {
-        let tools = Tools::from(vec![Tool::builder()
-            .with_name("tool1")
-            .with_handler(empty_handler)
-            .build()
-            .unwrap()]);
+        let tools = ToolBox::from(vec![EmptyTool]);
         let builder = MessagesRequestBuilder::new().with_tools(tools.clone());
         assert!(builder.tools.unwrap().get("tool1").is_some());
     }
 
     #[test]
     fn test_messages_request_builder_add_tool() {
-        let tool = Tool::builder()
-            .with_name("tool1")
-            .with_handler(empty_handler)
-            .build()
-            .unwrap();
-        let builder = MessagesRequestBuilder::new().add_tool(tool);
+        let builder = MessagesRequestBuilder::new().add_tool(EmptyTool);
         assert!(builder.tools.unwrap().get("tool1").is_some());
     }
 
@@ -905,7 +896,7 @@ mod test {
             .unwrap();
         let mut request = MessagesRequest {
             messages: Messages::default(),
-            tools: Tools::new(),
+            tools: ToolBox::default(),
             model: "model".to_string(),
             system: None,
             max_tokens: 10,
@@ -930,7 +921,7 @@ mod test {
             .unwrap();
         let request = MessagesRequest {
             messages: Messages::default(),
-            tools: Tools::new(),
+            tools: ToolBox::default(),
             model: "model".to_string(),
             system: None,
             max_tokens: 10,
@@ -1039,20 +1030,42 @@ mod test {
         struct TestHandlerProps {
             random_number: i32,
         }
-        async fn test_handler(
-            _input: TestHandlerProps,
-            _cx: ToolContext,
-        ) -> Result<serde_json::Value, ToolError> {
-            Ok(json!("To finish this test write [finish_test]"))
+        struct TestTool;
+        #[async_trait]
+        impl Tool for TestTool {
+            type Input = TestHandlerProps;
+
+            type Output = Value;
+
+            fn name(&self) -> &str {
+                "test_tool"
+            }
+
+            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, tool::ToolError> {
+                Ok(json!("To finish this test write [finish_test]"))
+            }
         }
 
-        async fn finish_handler(
-            _input: serde_json::Value,
-            cx: ToolContext,
-        ) -> Result<serde_json::Value, ToolError> {
-            let is_finished = cx.expect_resource::<Arc<AtomicBool>>();
-            is_finished.store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok(json!("Congratulations! You finished the test."))
+        #[derive(Default, Clone)]
+        struct FinishTool {
+            is_finished: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl Tool for FinishTool {
+            type Input = Value;
+
+            type Output = Value;
+
+            fn name(&self) -> &str {
+                "finish_tool"
+            }
+
+            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, tool::ToolError> {
+                self.is_finished
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(json!("Congratulations! You finished the test."))
+            }
         }
 
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
@@ -1063,23 +1076,10 @@ mod test {
             .build()
             .unwrap();
 
-        let test_tool = Tool::builder()
-            .with_name("test_tool")
-            .with_handler(test_handler)
-            .build()
-            .unwrap();
-
-        let finish_tool = Tool::builder()
-            .with_name("finish_test")
-            .with_handler(finish_handler)
-            .build()
-            .unwrap();
-
-        let is_finished = Arc::new(AtomicBool::new(false));
-        let tcx = ToolContext::default();
-        tcx.add_resource(is_finished.clone());
-
-        let tools = Tools::from(vec![test_tool, finish_tool]);
+        let tools = ToolBox::default();
+        tools.add(TestTool);
+        let finish_tool = FinishTool::default();
+        tools.add(finish_tool.clone());
         println!("{}", serde_json::to_string_pretty(&tools).unwrap());
 
         let mut messages = Messages::default();
@@ -1118,14 +1118,17 @@ mod test {
             let tools_used = res.tool_uses();
             let mut content = Vec::<MultimodalContent>::new();
             for tool in tools_used {
-                let result = tools.invoke(tool.clone(), tcx.clone()).await;
+                let result = tools.invoke(tool.clone()).await;
                 content.push(result.into());
             }
             if !content.is_empty() {
                 content.push("Here you have the result.".into());
                 messages.add_message(Message::user(content));
             }
-            if is_finished.load(std::sync::atomic::Ordering::Relaxed) {
+            if finish_tool
+                .is_finished
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 println!("Test passed");
                 break;
             }

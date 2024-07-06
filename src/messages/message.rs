@@ -4,7 +4,7 @@ use base64::Engine;
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 
-use super::tools::{ToolResult, ToolUse};
+use super::tool::{ToolResult, ToolUse};
 
 use strum::{Display, EnumString};
 
