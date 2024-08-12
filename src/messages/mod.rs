@@ -623,6 +623,7 @@ mod test {
 
     use super::*;
 
+    #[derive(Clone)]
     pub struct EmptyTool;
 
     #[async_trait]
@@ -631,11 +632,13 @@ mod test {
 
         type Output = ();
 
-        fn name(&self) -> &str {
-            "empty_tool"
+        type Error = String;
+
+        fn name(&self) -> String {
+            "empty_tool".to_string()
         }
 
-        async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, tool::ToolError> {
+        async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
             dbg!("EmptyTool");
             Ok(())
         }
@@ -659,13 +662,13 @@ mod test {
     fn test_messages_request_builder_tools() {
         let tools = ToolBox::from(vec![EmptyTool]);
         let builder = MessagesRequestBuilder::new().with_tools(tools.clone());
-        assert!(builder.tools.unwrap().get("tool1").is_some());
+        assert!(builder.tools.unwrap().get("empty_tool").is_some());
     }
 
     #[test]
     fn test_messages_request_builder_add_tool() {
         let builder = MessagesRequestBuilder::new().add_tool(EmptyTool);
-        assert!(builder.tools.unwrap().get("tool1").is_some());
+        assert!(builder.tools.unwrap().get("empty_tool").is_some());
     }
 
     #[test]
@@ -1030,6 +1033,7 @@ mod test {
         struct TestHandlerProps {
             random_number: i32,
         }
+        #[derive(Clone)]
         struct TestTool;
         #[async_trait]
         impl Tool for TestTool {
@@ -1037,11 +1041,13 @@ mod test {
 
             type Output = Value;
 
-            fn name(&self) -> &str {
-                "test_tool"
+            type Error = String;
+
+            fn name(&self) -> String {
+                "test_tool".to_string()
             }
 
-            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, tool::ToolError> {
+            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
                 Ok(json!("To finish this test write [finish_test]"))
             }
         }
@@ -1057,11 +1063,13 @@ mod test {
 
             type Output = Value;
 
-            fn name(&self) -> &str {
-                "finish_tool"
+            type Error = String;
+
+            fn name(&self) -> String {
+                "finish_tool".to_string()
             }
 
-            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, tool::ToolError> {
+            async fn invoke(&self, _input: Self::Input) -> Result<Self::Output, Self::Error> {
                 self.is_finished
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(json!("Congratulations! You finished the test."))
@@ -1080,7 +1088,6 @@ mod test {
         tools.add(TestTool);
         let finish_tool = FinishTool::default();
         tools.add(finish_tool.clone());
-        println!("{}", serde_json::to_string_pretty(&tools).unwrap());
 
         let mut messages = Messages::default();
         messages.add_message(UserMessage::from(
@@ -1125,6 +1132,7 @@ mod test {
                 content.push("Here you have the result.".into());
                 messages.add_message(Message::user(content));
             }
+            dbg!(&messages);
             if finish_tool
                 .is_finished
                 .load(std::sync::atomic::Ordering::Relaxed)

@@ -7,7 +7,7 @@ pub mod messages;
 
 const BASE_URL: &str = "https://api.anthropic.com";
 
-#[derive(Debug, strum::EnumString, strum::Display)]
+#[derive(Debug, PartialEq, PartialOrd, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "kebab-case")]
 pub enum Model {
     #[strum(to_string = "claude-3-haiku-20240307")]

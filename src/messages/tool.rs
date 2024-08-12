@@ -10,22 +10,23 @@ use std::{
 use super::message::MultimodalContent;
 
 #[async_trait]
-pub trait AnyTool {
-    fn name(&self) -> &str;
-    fn description(&self) -> Option<&str>;
-    async fn invoke_any(&self, input: Value) -> Result<Value, ToolError>;
+pub trait AnyTool: Send + Sync {
+    fn name(&self) -> String;
+    fn description(&self) -> Option<String>;
+    async fn invoke_any(&self, tool_use: ToolUse) -> ToolResult;
     fn input_schema(&self) -> Value;
 }
 
 #[async_trait]
-pub trait Tool: Send + Sync {
+pub trait Tool: Clone + Send + Sync {
     type Input: JsonSchema + DeserializeOwned + Send + Sync;
     type Output: Serialize + Send + Sync;
-    fn name(&self) -> &str;
-    fn description(&self) -> Option<&str> {
+    type Error: ToString;
+    fn name(&self) -> String;
+    fn description(&self) -> Option<String> {
         None
     }
-    async fn invoke(&self, input: Self::Input) -> Result<Self::Output, ToolError>;
+    async fn invoke(&self, input: Self::Input) -> Result<Self::Output, Self::Error>;
     fn input_schema(&self) -> Value {
         let mut settings = schemars::gen::SchemaSettings::draft07();
         settings.inline_subschemas = true;
@@ -39,20 +40,35 @@ pub trait Tool: Send + Sync {
 
 #[async_trait]
 impl<T: Tool + Send + Sync> AnyTool for T {
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         self.name()
     }
 
-    fn description(&self) -> Option<&str> {
+    fn description(&self) -> Option<String> {
         self.description()
     }
 
-    async fn invoke_any(&self, input: Value) -> Result<Value, ToolError> {
-        let typed_input: T::Input = serde_json::from_value(input)
-            .map_err(|e| ToolError::InputDeserializationFailed(e.to_string()))?;
-        let output = self.invoke(typed_input).await?;
-        serde_json::to_value(output)
-            .map_err(|e| ToolError::OutputSerializationFailed(e.to_string()))
+    async fn invoke_any(&self, tool_use: ToolUse) -> ToolResult {
+        let typed_input: T::Input = match serde_json::from_value(tool_use.input) {
+            Ok(input) => input,
+            Err(e) => {
+                return ToolResult::error(
+                    tool_use.id,
+                    ToolError::InputDeserializationFailed(e.to_string()),
+                )
+            }
+        };
+
+        match self.invoke(typed_input).await {
+            Ok(output) => match serde_json::to_value(output) {
+                Ok(value) => ToolResult::new(tool_use.id, value),
+                Err(e) => ToolResult::error(
+                    tool_use.id,
+                    ToolError::OutputSerializationFailed(e.to_string()),
+                ),
+            },
+            Err(e) => ToolResult::error(tool_use.id, e),
+        }
     }
 
     fn input_schema(&self) -> Value {
@@ -109,10 +125,7 @@ impl ToolBox {
 
     pub async fn invoke(&self, tool_use: ToolUse) -> ToolResult {
         match self.get(&tool_use.name) {
-            Some(tool) => match tool.invoke_any(tool_use.input).await {
-                Ok(result) => ToolResult::new(tool_use.id, result),
-                Err(error) => ToolResult::error(tool_use.id, error),
-            },
+            Some(tool) => tool.invoke_any(tool_use).await,
             None => ToolResult::error(tool_use.id, ToolError::ToolNotFound(tool_use.name)),
         }
     }
@@ -134,8 +147,8 @@ impl ToolBox {
             .unwrap()
             .values()
             .map(|tool| ToolMetadataInfo {
-                name: tool.name().to_string(),
-                description: tool.description().map(std::string::ToString::to_string),
+                name: tool.name(),
+                description: tool.description(),
                 input_schema: tool.input_schema(),
             })
             .collect()
@@ -268,9 +281,9 @@ impl ToolResult {
         self.content.push(content.into());
     }
 
-    pub fn error<T: Into<String>>(id: T, error: ToolError) -> Self {
+    pub fn error<E: ToString>(id: String, error: E) -> Self {
         Self {
-            id: id.into(),
+            id,
             content: vec![error.to_string().into()],
             is_error: true,
         }

@@ -944,8 +944,4 @@ mod tests {
 
         assert!(serialized.contains(r#""type":"tool_use""#));
     }
-    #[test]
-    fn test_stacktrace() {
-        panic!("foo")
-    }
 }
