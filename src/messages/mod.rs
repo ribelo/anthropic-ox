@@ -3,11 +3,10 @@ pub mod tool;
 
 use std::pin::Pin;
 
+use futures::{Stream, StreamExt};
 use message::Text;
-use reqwest_eventsource::{self, Event, EventSource, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio_stream::{Stream, StreamExt};
 use tool::{Tool, ToolBox, ToolResult, ToolUse, ToolUseBuilder};
 
 use crate::{Anthropic, ApiError, ApiErrorDetail, ErrorInfo, BASE_URL};
@@ -36,7 +35,7 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
     #[serde(skip)]
-    pub client: Anthropic,
+    pub anthropic: Anthropic,
 }
 
 #[derive(Debug, Default)]
@@ -154,7 +153,7 @@ impl MessagesRequestBuilder {
             temperature: self.temperature,
             top_p: self.top_p,
             top_k: self.top_k,
-            client: self
+            anthropic: self
                 .client
                 .ok_or(MessagesRequestBuilderError::ClientNotSet)?,
         })
@@ -487,11 +486,11 @@ impl MessagesRequest {
             serde_json::to_value(self).map_err(|e| ApiError::Serialization(e.to_string()))?;
 
         let response = self
-            .client
+            .anthropic
             .client
             .post(&url)
-            .header("x-api-key", &self.client.api_key)
-            .header("anthropic-version", &self.client.version)
+            .header("x-api-key", &self.anthropic.api_key)
+            .header("anthropic-version", &self.anthropic.version)
             .header("anthropic-beta", "tools-2024-04-04")
             .json(&body)
             .send()
@@ -517,95 +516,46 @@ impl MessagesRequest {
         }
     }
 
-    pub fn stream(&self) -> impl Stream<Item = Result<EventData, ApiError>> {
-        let url = format!("{}/{}", BASE_URL, API_URL);
+    pub async fn stream(&self) -> impl Stream<Item = Result<EventData, ApiError>> {
+        let url = format!("{BASE_URL}/{API_URL}");
         let mut body = serde_json::to_value(self).expect("Failed to serialize request");
         body["stream"] = serde_json::Value::Bool(true);
 
-        let es = self
-            .client
+        let stream = self
+            .anthropic
             .client
             .post(url)
-            .header("x-api-key", &self.client.api_key)
+            .header("x-api-key", &self.anthropic.api_key)
             .header("content-type", "application/json")
-            .header("anthropic-version", &self.client.version)
-            .header("anthropic-beta", "tools-2024-04-04")
+            .header("anthropic-version", &self.anthropic.version)
             .json(&body)
-            .eventsource()
-            .expect("Failed to create EventSource");
+            .send()
+            .await
+            .unwrap()
+            .bytes_stream();
 
-        tokio_stream::wrappers::UnboundedReceiverStream::new(process_event_stream(es))
-    }
-}
-
-fn process_event_stream(
-    mut es: EventSource,
-) -> tokio::sync::mpsc::UnboundedReceiver<Result<EventData, ApiError>> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-
-    tokio::spawn(async move {
-        while let Some(event) = es.next().await {
-            match event {
-                Ok(Event::Open) => {}
-                Ok(Event::Message(msg)) => {
-                    match serde_json::from_str::<EventData>(msg.data.as_str()) {
-                        Ok(event_data) => match event_data {
-                            EventData::MessageStop => {
-                                if tx.send(Ok(event_data)).is_err() {
-                                    break;
-                                }
-                                es.close();
-                                break;
-                            }
-                            EventData::Error { error } => {
-                                if tx.send(Err(error.into())).is_err() {
-                                    break;
-                                }
-                            }
-                            _ => {
-                                if tx.send(Ok(event_data)).is_err() {
-                                    break;
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            if tx
-                                .send(Err(ApiError::Deserialization(e.to_string())))
-                                .is_err()
-                            {
-                                break;
-                            }
+        let filtered_stream = stream.filter_map(|chunk| async move {
+            match chunk {
+                Ok(bytes) => {
+                    let data = String::from_utf8(bytes.to_vec()).unwrap();
+                    match data.as_str() {
+                        "" => None,
+                        s if s.starts_with("data: ") => {
+                            let json_data = s.trim_start_matches("data: ");
+                            Some(
+                                serde_json::from_str::<EventData>(json_data)
+                                    .map_err(|e| ApiError::Deserialization(e.to_string())),
+                            )
                         }
+                        _ => Some(Err(ApiError::InvalidEventData(data))),
                     }
                 }
-
-                Err(e) => {
-                    let error = match e {
-                        reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
-                            match response.json::<ErrorResponse>().await {
-                                Ok(json) => ApiError::from(json),
-                                Err(e) => {
-                                    dbg!(e);
-                                    ApiError::UnexpectedResponse(format!(
-                                        "Invalid status code: {}",
-                                        status
-                                    ))
-                                }
-                            }
-                        }
-                        _ => ApiError::Stream(e.to_string()),
-                    };
-
-                    es.close();
-                    if tx.send(Err(error)).is_err() {
-                        break;
-                    }
-                }
+                Err(e) => Some(Err(ApiError::Stream(e.to_string()))),
             }
-        }
-    });
+        });
 
-    rx
+        Box::pin(filtered_stream)
+    }
 }
 
 #[cfg(test)]
@@ -617,11 +567,25 @@ mod test {
     use message::UserMessage;
     use schemars::JsonSchema;
     use serde_json::{json, Value};
+    use tap::{self, Pipe, Tap};
     use test::message::{MultimodalContent, Text};
 
     use crate::AnthropicBuilder;
 
     use super::*;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn get_api_key() -> String {
+        std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set")
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn get_api_key() -> String {
+        std::env!("ANTHROPIC_API_KEY").to_string()
+    }
 
     #[derive(Clone)]
     pub struct EmptyTool;
@@ -645,6 +609,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_messages() {
         let messages = Messages::from(Message::user(vec!["Hello"]));
         let builder = MessagesRequestBuilder::new().with_messages(messages.clone());
@@ -652,6 +617,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_add_message() {
         let message = Message::user(vec!["Hello"]);
         let builder = MessagesRequestBuilder::new().with_message(message.clone());
@@ -659,6 +625,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_tools() {
         let tools = ToolBox::from(vec![EmptyTool]);
         let builder = MessagesRequestBuilder::new().with_tools(tools.clone());
@@ -666,12 +633,14 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_add_tool() {
         let builder = MessagesRequestBuilder::new().add_tool(EmptyTool);
         assert!(builder.tools.unwrap().get("empty_tool").is_some());
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_model() {
         let model = "";
         let builder = MessagesRequestBuilder::new().with_model(model);
@@ -679,6 +648,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_system() {
         let system = "You are a helpful assistant";
         let builder = MessagesRequestBuilder::new().with_system(system);
@@ -686,6 +656,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_max_tokens() {
         let max_tokens = 100;
         let builder = MessagesRequestBuilder::new().with_max_tokens(max_tokens);
@@ -693,6 +664,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_stop_sequences() {
         let stop_sequences = vec!["stop1".to_string(), "stop2".to_string()];
         let builder = MessagesRequestBuilder::new().with_stop_sequences(stop_sequences.clone());
@@ -700,12 +672,14 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_stream() {
         let builder = MessagesRequestBuilder::new().enable_stream();
         assert_eq!(builder.stream, Some(true));
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_temperature() {
         let temperature = 0.5;
         let builder = MessagesRequestBuilder::new().with_temperature(temperature);
@@ -713,6 +687,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_top_p() {
         let top_p = 0.8;
         let builder = MessagesRequestBuilder::new().with_top_p(top_p);
@@ -720,6 +695,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_top_k() {
         let top_k = 50;
         let builder = MessagesRequestBuilder::new().with_top_k(top_k);
@@ -727,9 +703,10 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_client() {
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
         let builder = MessagesRequestBuilder::new().with_client(client.clone());
@@ -737,12 +714,13 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_build_success() {
         let messages = Messages::from(vec!["Hello"]);
         let model = "claude-3-sonnet-20240229";
         let max_tokens = 100;
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
 
@@ -760,11 +738,12 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_build_messages_not_set() {
         let model = "claude-3-sonnet-20240229";
         let max_tokens = 100;
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
 
@@ -781,11 +760,12 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_build_model_not_set() {
         let messages = Messages::from(vec![UserMessage::from("Hello")]);
         let max_tokens = 100;
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
 
@@ -802,11 +782,12 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_build_max_tokens_not_set() {
         let messages = Messages::from(vec![UserMessage::from("Hello")]);
         let model = "claude-3-sonnet-20240229";
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
 
@@ -823,6 +804,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_builder_build_client_not_set() {
         let messages = Messages::from(vec![UserMessage::from("Hello")]);
         let model = "claude-3-sonnet-20240229";
@@ -841,6 +823,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_stop_reason_serialization() {
         let end_turn = StopReason::EndTurn;
         let max_tokens = StopReason::MaxTokens;
@@ -858,6 +841,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_stop_reason_deserialization() {
         let end_turn_json = r#""end_turn""#;
         let max_tokens_json = r#""max_tokens""#;
@@ -878,6 +862,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_usage_deserialization() {
         let usage_json = r#"{"input_tokens":10,"output_tokens":20}"#;
         let expected_usage = Usage {
@@ -892,9 +877,10 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_push_message() {
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
         let mut request = MessagesRequest {
@@ -908,7 +894,7 @@ mod test {
             temperature: None,
             top_p: None,
             top_k: None,
-            client,
+            anthropic: client,
         };
 
         request.add_message(UserMessage::from("Hello"));
@@ -917,9 +903,10 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_request_add_message() {
         let client = AnthropicBuilder::default()
-            .api_key("api_key")
+            .with_api_key("api_key")
             .build()
             .unwrap();
         let request = MessagesRequest {
@@ -933,7 +920,7 @@ mod test {
             temperature: None,
             top_p: None,
             top_k: None,
-            client,
+            anthropic: client,
         };
 
         let new_request = request.with_message(UserMessage::from("Hello"));
@@ -942,6 +929,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_response_deserialization() {
         let json = r#"{
             "id":"msg_015UCYG7heogFUS81jXr4z45",
@@ -971,6 +959,7 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_messages_response_serialization() {
         let response = MessagesResponse {
         id: "msg_015UCYG7heogFUS81jXr4z45".to_string(),
@@ -1005,13 +994,14 @@ mod test {
         assert_eq!(expected_value, response_value);
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_messages_stream_request() {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+        let api_key = get_api_key();
         let client = reqwest::Client::new();
         let anthropic = AnthropicBuilder::default()
-            .api_key(api_key)
-            .client(&client)
+            .with_api_key(api_key)
+            .with_client(&client)
             .build()
             .unwrap();
         let mut res = anthropic
@@ -1021,13 +1011,16 @@ mod test {
             .with_message(UserMessage::from("Hi, I'm John."))
             .build()
             .unwrap()
-            .stream();
+            .stream()
+            .await;
+
         // dbg!(res);
         while let Some(res) = res.next().await {
             dbg!(res);
         }
     }
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_messages_request_success() {
         #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
         struct TestHandlerProps {
@@ -1076,11 +1069,12 @@ mod test {
             }
         }
 
-        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+        let api_key = get_api_key();
+        console_log!("api_key: {api_key}");
         let client = reqwest::Client::new();
         let anthropic = AnthropicBuilder::default()
-            .api_key(api_key)
-            .client(&client)
+            .with_api_key(api_key)
+            .with_client(&client)
             .build()
             .unwrap();
 
@@ -1137,7 +1131,7 @@ mod test {
                 .is_finished
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                println!("Test passed");
+                console_log!("Test passed");
                 break;
             }
         }

@@ -8,7 +8,6 @@ pub mod messages;
 const BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Debug, PartialEq, PartialOrd, strum::EnumString, strum::Display)]
-#[strum(serialize_all = "kebab-case")]
 pub enum Model {
     #[strum(to_string = "claude-3-haiku-20240307")]
     Claude3Haiku,
@@ -20,34 +19,48 @@ pub enum Model {
     Claude35Sonnet,
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "leaky-bucket")] {
-        use derivative::Derivative;
-        use std::sync::Arc;
-        pub use leaky_bucket::RateLimiter;
-    }
-}
+#[cfg(feature = "leaky-bucket")]
+use leaky_bucket::RateLimiter;
+#[cfg(feature = "leaky-bucket")]
+use std::sync::Arc;
 
-#[derive(Derivative)]
-#[derivative(Default)]
 pub struct AnthropicBuilder {
     api_key: Option<String>,
-    #[derivative(Default(value = r#""2023-06-01".to_string()"#))]
     version: String,
     client: Option<reqwest::Client>,
     #[cfg(feature = "leaky-bucket")]
     leaky_bucket: Option<RateLimiter>,
 }
 
-#[derive(Clone, Derivative)]
-#[derivative(Debug)]
+impl Default for AnthropicBuilder {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            version: "2023-06-01".to_string(),
+            client: None,
+            #[cfg(feature = "leaky-bucket")]
+            leaky_bucket: None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Anthropic {
     api_key: String,
     version: String,
     client: reqwest::Client,
-    #[derivative(Debug = "ignore")]
     #[cfg(feature = "leaky-bucket")]
     leaky_bucket: Option<Arc<RateLimiter>>,
+}
+
+impl std::fmt::Debug for Anthropic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Anthropic")
+            .field("api_key", &"[REDACTED]")
+            .field("version", &self.version)
+            .field("client", &self.client)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -74,18 +87,18 @@ impl AnthropicBuilder {
         Default::default()
     }
 
-    pub fn api_key<T: ToString>(mut self, api_key: T) -> AnthropicBuilder {
+    pub fn with_api_key<T: ToString>(mut self, api_key: T) -> AnthropicBuilder {
         self.api_key = Some(api_key.to_string());
         self
     }
 
-    pub fn client(mut self, client: &reqwest::Client) -> AnthropicBuilder {
+    pub fn with_client(mut self, client: &reqwest::Client) -> AnthropicBuilder {
         self.client = Some(client.clone());
         self
     }
 
     #[cfg(feature = "leaky-bucket")]
-    pub fn limiter(mut self, leaky_bucket: RateLimiter) -> AnthropicBuilder {
+    pub fn with_limiter(mut self, leaky_bucket: RateLimiter) -> AnthropicBuilder {
         self.leaky_bucket = Some(leaky_bucket);
         self
     }
@@ -173,14 +186,14 @@ pub enum ApiError {
     #[error("JSON serialization/deserialization error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("EventSource error: {0}")]
-    EventSource(#[from] reqwest_eventsource::Error),
-
     #[error("Unexpected API response: {0}")]
     UnexpectedResponse(String),
 
     #[error("Serialization failed: {0}")]
     Serialization(String),
+
+    #[error("Invalid event data: {0}")]
+    InvalidEventData(String),
 }
 
 impl From<ErrorInfo> for ApiError {

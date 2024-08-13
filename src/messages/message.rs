@@ -1,7 +1,6 @@
 use std::{fmt, path::Path};
 
 use base64::Engine;
-use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 
 use super::tool::{ToolResult, ToolUse};
@@ -342,9 +341,8 @@ impl From<UserMessage> for Vec<MultimodalContent> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Derivative, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AssistantMessage {
-    #[derivative(Default(value = "Role::Assistant"))]
     pub role: Role,
     pub content: Vec<MultimodalContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,6 +351,18 @@ pub struct AssistantMessage {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+impl Default for AssistantMessage {
+    fn default() -> Self {
+        Self {
+            role: Role::Assistant,
+            content: Vec::new(),
+            name: None,
+            id: None,
+            model: None,
+        }
+    }
 }
 
 impl AssistantMessage {
@@ -651,7 +661,11 @@ impl<'a> IntoIterator for &'a mut Messages {
 mod tests {
     use super::*;
 
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_role_serialization() {
         let user_role = Role::User;
         let assistant_role = Role::Assistant;
@@ -664,6 +678,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_role_deserialization() {
         let user_json = "\"user\"";
         let assistant_json = "\"assistant\"";
@@ -676,6 +691,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_text_serialization() {
         let text = Text {
             text: "Hello".to_string(),
@@ -685,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_text_deserialization() {
         let json = "{\"text\":\"Hello\"}";
         let text: Text = serde_json::from_str(json).unwrap();
@@ -692,6 +709,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_text_from_string() {
         let text_string = "Hello".to_string();
         let text: Text = text_string.into();
@@ -699,6 +717,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_message_content_multiple_deserialization() {
         let json =
             "[{\"type\":\"text\",\"text\":\"Hello\"},{\"type\":\"text\",\"text\":\"World\"}]";
@@ -706,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_text_serialization() {
         let text_content = MultimodalContent::Text("Hello".into());
         let json = serde_json::to_string(&text_content).unwrap();
@@ -713,6 +733,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_text_deserialization() {
         let json = "{\"type\":\"text\",\"text\":\"Hello\"}";
         let text_content: MultimodalContent = serde_json::from_str(json).unwrap();
@@ -720,6 +741,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_image_serialization() {
         let image_content = MultimodalContent::Image(Image {
             source: ImageSource::Base64 {
@@ -735,6 +757,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_image_deserialization() {
         let json = "{\"type\":\"image\",\"source\":{\"type\":\"Base64\",\"media_type\":\"image/png\",\"data\":\"base64-data\"}}";
         let image_content: MultimodalContent = serde_json::from_str(json).unwrap();
@@ -742,6 +765,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_from_string() {
         let text = "Hello".to_string();
         let content: MultimodalContent = text.into();
@@ -749,6 +773,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_image_source_base64_serialization() {
         let base64_source = ImageSource::Base64 {
             media_type: "image/png".to_string(),
@@ -762,6 +787,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_image_source_base64_deserialization() {
         let json = "{\"type\":\"Base64\",\"media_type\":\"image/png\",\"data\":\"base64-data\"}";
         let base64_source: ImageSource = serde_json::from_str(json).unwrap();
@@ -775,6 +801,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_serialization() {
         let user_message = UserMessage {
             role: Role::User,
@@ -792,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_deserialization() {
         let json = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"name\":\"John\"}";
         let user_message: UserMessage = serde_json::from_str(json).unwrap();
@@ -799,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_multiple_deserialization() {
         let json = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"name\":\"John\"}";
         let user_message: UserMessage = serde_json::from_str(json).unwrap();
@@ -808,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_without_name_serialization() {
         let user_message = UserMessage {
             role: Role::User,
@@ -824,6 +854,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_without_name_deserialization() {
         let json = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}";
         let user_message: UserMessage = serde_json::from_str(json).unwrap();
@@ -832,6 +863,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_new() {
         let content = "Hello".to_string();
         let user_message = UserMessage::new(vec![content.clone()]);
@@ -840,6 +872,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_user_message_from_string() {
         let content = "Hello".to_string();
         let user_message: UserMessage = content.clone().into();
@@ -848,6 +881,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_assistant_message_serialization() {
         let assistant_message = AssistantMessage {
             role: Role::Assistant,
@@ -866,6 +900,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_assistant_message_deserialization() {
         let json =
             "{\"role\":\"assistant\",\"content\":[{\"type\": \"text\", \"text\":\"Hello\"}],\"name\":\"Assistant\"}";
@@ -876,6 +911,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_assistant_message_without_name_serialization() {
         let assistant_message = AssistantMessage {
             role: Role::Assistant,
@@ -894,6 +930,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_assistant_message_without_name_deserialization() {
         let json = "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}";
         let assistant_message: AssistantMessage = serde_json::from_str(json).unwrap();
@@ -902,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_tool_use_serialization() {
         let tool_use = ToolUse {
             id: "test_id".to_string(),
@@ -928,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     fn test_multimodal_content_tool_use_type() {
         let tool_use = ToolUse {
             id: "test_id".to_string(),
